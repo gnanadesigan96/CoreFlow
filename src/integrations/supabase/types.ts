@@ -690,6 +690,33 @@ export type Database = {
         }
         Relationships: []
       }
+      app_secrets: {
+        Row: {
+          key: string
+          description: string
+          vault_id: string
+          created_at: string
+          updated_at: string
+          updated_by: string | null
+        }
+        Insert: {
+          key: string
+          description?: string
+          vault_id: string
+          created_at?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Update: {
+          key?: string
+          description?: string
+          vault_id?: string
+          created_at?: string
+          updated_at?: string
+          updated_by?: string | null
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
@@ -706,6 +733,13 @@ export type Database = {
       }
       is_admin: { Args: never; Returns: boolean }
       is_agent: { Args: never; Returns: boolean }
+      is_superadmin: { Args: never; Returns: boolean }
+      vault_upsert_secret: {
+        Args: { _key: string; _value: string; _description?: string | null }
+        Returns: undefined
+      }
+      vault_delete_secret: { Args: { _key: string }; Returns: undefined }
+      vault_read_secret: { Args: { _key: string }; Returns: string | null }
       kb_view: { Args: { _article_id: string }; Returns: undefined }
       kb_vote: {
         Args: { _article_id: string; _helpful: boolean }
@@ -715,7 +749,7 @@ export type Database = {
       shared_customer_ids: { Args: never; Returns: string[] }
     }
     Enums: {
-      app_role: "admin" | "agent" | "guest"
+      app_role: "admin" | "agent" | "guest" | "superadmin"
       message_kind: "inbound" | "reply" | "note"
       ticket_channel: "email" | "chat" | "portal" | "phone" | "api"
       ticket_priority: "P1" | "P2" | "P3" | "P4"
@@ -847,7 +881,7 @@ export type CompositeTypes<
 export const Constants = {
   public: {
     Enums: {
-      app_role: ["admin", "agent", "guest"],
+      app_role: ["admin", "agent", "guest", "superadmin"],
       message_kind: ["inbound", "reply", "note"],
       ticket_channel: ["email", "chat", "portal", "phone", "api"],
       ticket_priority: ["P1", "P2", "P3", "P4"],

@@ -132,6 +132,7 @@ type DeskContextValue = {
   me: Me;
   isAgent: boolean;
   isAdmin: boolean;
+  isSuperadmin: boolean;
   loading: boolean;
   now: number;
   refresh: () => Promise<void>;
@@ -200,8 +201,9 @@ export function DeskProvider({ me, children }: { me: Me; children: ReactNode }) 
   const [now, setNow] = useState(() => Date.now());
   const inFlight = useRef(false);
 
-  const isAgent = me.role === "agent" || me.role === "admin";
-  const isAdmin = me.role === "admin";
+  const isAgent = me.role === "agent" || me.role === "admin" || me.role === "superadmin";
+  const isAdmin = me.role === "admin" || me.role === "superadmin";
+  const isSuperadmin = me.role === "superadmin";
 
   const refresh = useCallback(async () => {
     if (inFlight.current) return;
@@ -285,7 +287,7 @@ export function DeskProvider({ me, children }: { me: Me; children: ReactNode }) 
             id: p.id,
             handle: p.handle || p.email,
             name: p.full_name || p.email,
-            team: role === "admin" ? "Desk admin" : "Agent",
+            team: role === "superadmin" ? "Superadmin" : role === "admin" ? "Desk admin" : "Agent",
             initials: initialsOf(p.full_name || p.email),
             role,
           });
@@ -834,6 +836,7 @@ export function DeskProvider({ me, children }: { me: Me; children: ReactNode }) 
       me,
       isAgent,
       isAdmin,
+      isSuperadmin,
       loading,
       now,
       refresh,
@@ -872,6 +875,7 @@ export function DeskProvider({ me, children }: { me: Me; children: ReactNode }) 
       me,
       isAgent,
       isAdmin,
+      isSuperadmin,
       loading,
       now,
       refresh,

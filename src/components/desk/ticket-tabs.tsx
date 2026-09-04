@@ -182,7 +182,7 @@ export function ResolutionPanel({ ticket, isAgent }: { ticket: Ticket; isAgent: 
 /* ---------------- Time entries ---------------- */
 
 export function TimePanel({ ticket }: { ticket: Ticket }) {
-  const { state, addTimeEntry, removeTimeEntry, me } = useDesk();
+  const { state, addTimeEntry, removeTimeEntry, me, isAdmin } = useDesk();
   const entries = state.timeEntries.filter((e) => e.ticketId === ticket.id);
   const [minutes, setMinutes] = useState("15");
   const [note, setNote] = useState("");
@@ -255,7 +255,7 @@ export function TimePanel({ ticket }: { ticket: Ticket }) {
             <span className="font-mono text-[10px] text-faint">
               {new Date(e.at).toLocaleDateString()}
             </span>
-            {(e.agentId === me.id || me.role === "admin") && (
+            {(e.agentId === me.id || isAdmin) && (
               <button
                 onClick={() => void removeTimeEntry(e.id)}
                 className="text-[11px] text-faint transition-colors hover:text-red"

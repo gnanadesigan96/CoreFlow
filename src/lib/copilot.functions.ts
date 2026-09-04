@@ -62,7 +62,8 @@ export const askCopilot = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((data: unknown) => inputSchema.parse(data))
   .handler(async ({ data }) => {
-    const apiKey = process.env["ANTHROPIC_API_KEY"];
+    const { getSecret } = await import("@/lib/vault.server");
+    const apiKey = await getSecret("ANTHROPIC_API_KEY");
     if (!apiKey) throw new Error("The AI copilot is not configured for this workspace.");
 
     const client = new Anthropic({ apiKey });

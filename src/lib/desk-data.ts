@@ -2,7 +2,7 @@ export type Status = "open" | "pending" | "on_hold" | "resolved" | "closed";
 export type Priority = "P1" | "P2" | "P3" | "P4";
 export type Channel = "email" | "chat" | "api" | "portal" | "phone";
 export type MessageKind = "customer" | "agent" | "note" | "event";
-export type Role = "admin" | "agent" | "guest";
+export type Role = "admin" | "agent" | "guest" | "superadmin";
 
 export type Agent = {
   id: string;

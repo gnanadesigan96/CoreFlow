@@ -1,9 +1,15 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import type { Priority } from "@/lib/desk-data";
 import { useDesk, type CustomField, type SlaRule } from "@/lib/desk-store";
 import { cn } from "@/lib/utils";
+import {
+  deleteVaultSecret,
+  listVaultSecrets,
+  upsertVaultSecret,
+  type VaultSecretMeta,
+} from "@/lib/vault-client";
 
 export const Route = createFileRoute("/_authenticated/settings")({
   head: () => ({
@@ -24,7 +30,15 @@ export const Route = createFileRoute("/_authenticated/settings")({
   component: SettingsPage,
 });
 
-const TABS = ["SLA", "Layout & fields", "People & roles", "Departments", "Macros", "Sharing"] as const;
+const TABS = [
+  "SLA",
+  "Layout & fields",
+  "People & roles",
+  "Departments",
+  "Macros",
+  "Sharing",
+  "Vault",
+] as const;
 type Tab = (typeof TABS)[number];
 
 function Section({ title, hint, children }: { title: string; hint: string; children: React.ReactNode }) {
@@ -45,10 +59,11 @@ const ghostBtnCls =
   "h-8 rounded-md border border-line px-2.5 text-[11px] text-dim transition-colors hover:border-red/40 hover:text-red";
 
 function SettingsPage() {
-  const { isAgent: __isAgent } = useDesk();
+  const { isAgent: __isAgent, isSuperadmin } = useDesk();
   if (!__isAgent) return <AgentsOnly />;
 
   const [tab, setTab] = useState<Tab>("SLA");
+  const visibleTabs = TABS.filter((t) => t !== "Vault" || isSuperadmin);
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto p-5">
@@ -60,7 +75,7 @@ function SettingsPage() {
       </header>
 
       <div className="mb-4 flex flex-wrap gap-1">
-        {TABS.map((t) => (
+        {visibleTabs.map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
@@ -83,6 +98,7 @@ function SettingsPage() {
         {tab === "Departments" && <DepartmentSettings />}
         {tab === "Macros" && <MacroSettings />}
         {tab === "Sharing" && <SharingSettings />}
+        {tab === "Vault" && (isSuperadmin ? <VaultSettings /> : <SuperadminOnly />)}
       </div>
     </div>
   );
@@ -258,8 +274,12 @@ function FieldSettings() {
   );
 }
 
+const AGENT_ROLE_OPTIONS = ["guest", "agent", "admin"] as const;
+const SUPERADMIN_ROLE_OPTIONS = ["guest", "agent", "admin", "superadmin"] as const;
+
 function AgentSettings() {
-  const { state, me, isAdmin, setUserRole, toggleAgentDepartment } = useDesk();
+  const { state, me, isAdmin, isSuperadmin, setUserRole, toggleAgentDepartment } = useDesk();
+  const roleOptions = isSuperadmin ? SUPERADMIN_ROLE_OPTIONS : AGENT_ROLE_OPTIONS;
   const people = [
     ...state.agents,
     ...state.guests.map((g) => ({
@@ -297,7 +317,7 @@ function AgentSettings() {
                   <div className="font-mono text-[10px] text-faint">{person.handle}</div>
                 </div>
                 <div className="ml-auto flex gap-1">
-                  {(["guest", "agent", "admin"] as const).map((r) => (
+                  {roleOptions.map((r) => (
                     <button
                       key={r}
                       disabled={!isAdmin}
@@ -550,5 +570,155 @@ function AgentsOnly() {
         </p>
       </div>
     </div>
+  );
+}
+
+function SuperadminOnly() {
+  return (
+    <Section title="Vault" hint="Encrypted secrets for this workspace.">
+      <p className="rounded-md border border-amber/30 bg-amber/5 px-3 py-2 text-[11px] text-amber">
+        Only a superadmin can view or manage the vault.
+      </p>
+    </Section>
+  );
+}
+
+const VAULT_KEY_SUGGESTIONS = [
+  { key: "ANTHROPIC_API_KEY", hint: "Powers the AI Copilot (ticket insight, reply drafts, KB articles)." },
+];
+
+function VaultSettings() {
+  const [secrets, setSecrets] = useState<VaultSecretMeta[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [keyDraft, setKeyDraft] = useState("");
+  const [valueDraft, setValueDraft] = useState("");
+  const [descDraft, setDescDraft] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      setSecrets(await listVaultSecrets());
+    } catch {
+      toast.error("Could not load the vault.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  return (
+    <Section
+      title="Vault"
+      hint="Encrypted secrets (API keys, tokens) for this workspace. Values are write-only — once saved, they are never shown again, only replaced or removed."
+    >
+      {loading ? (
+        <p className="text-[11px] text-faint">Loading…</p>
+      ) : (
+        <div className="space-y-2">
+          {secrets.map((s) => (
+            <div
+              key={s.key}
+              className="flex flex-wrap items-center gap-3 rounded-md border border-line bg-raise px-3 py-2"
+            >
+              <div className="min-w-0">
+                <div className="font-mono text-[12px] text-fg">{s.key}</div>
+                {s.description && <div className="text-[11px] text-faint">{s.description}</div>}
+              </div>
+              <span className="font-mono text-[11px] tracking-widest text-faint">••••••••</span>
+              <span className="ml-auto text-[10px] text-faint">
+                updated {new Date(s.updatedAt).toLocaleDateString()}
+              </span>
+              <button
+                onClick={() => {
+                  void (async () => {
+                    try {
+                      await deleteVaultSecret(s.key);
+                      toast.success(`${s.key} removed from the vault`);
+                      await load();
+                    } catch {
+                      toast.error("Failed to remove secret");
+                    }
+                  })();
+                }}
+                className={cn(ghostBtnCls, "h-7")}
+              >
+                Remove
+              </button>
+            </div>
+          ))}
+          {secrets.length === 0 && <p className="text-[11px] text-faint">No secrets stored yet.</p>}
+        </div>
+      )}
+
+      <div className="mt-4 grid gap-2 rounded-md border border-line bg-raise p-3 sm:grid-cols-2">
+        <label className="block">
+          <span className="text-[10px] uppercase tracking-wider text-faint">Key</span>
+          <input
+            list="vault-key-suggestions"
+            value={keyDraft}
+            onChange={(e) => setKeyDraft(e.target.value)}
+            placeholder="ANTHROPIC_API_KEY"
+            className={cn(inputCls, "mt-1 font-mono")}
+          />
+          <datalist id="vault-key-suggestions">
+            {VAULT_KEY_SUGGESTIONS.map((s) => (
+              <option key={s.key} value={s.key} />
+            ))}
+          </datalist>
+        </label>
+        <label className="block">
+          <span className="text-[10px] uppercase tracking-wider text-faint">Value</span>
+          <input
+            type="password"
+            autoComplete="off"
+            value={valueDraft}
+            onChange={(e) => setValueDraft(e.target.value)}
+            placeholder="sk-ant-…"
+            className={cn(inputCls, "mt-1 font-mono")}
+          />
+        </label>
+        <label className="block sm:col-span-2">
+          <span className="text-[10px] uppercase tracking-wider text-faint">Description (optional)</span>
+          <input
+            value={descDraft}
+            onChange={(e) => setDescDraft(e.target.value)}
+            placeholder="What this key is for"
+            className={cn(inputCls, "mt-1")}
+          />
+        </label>
+        <button
+          disabled={saving}
+          className={cn(btnCls, "sm:justify-self-end disabled:opacity-40")}
+          onClick={() => {
+            const key = keyDraft.trim().toUpperCase();
+            if (!key || !valueDraft) {
+              toast.error("Key and value are required");
+              return;
+            }
+            void (async () => {
+              setSaving(true);
+              try {
+                await upsertVaultSecret(key, valueDraft, descDraft.trim() || undefined);
+                toast.success(`${key} saved to the vault`);
+                setKeyDraft("");
+                setValueDraft("");
+                setDescDraft("");
+                await load();
+              } catch {
+                toast.error("Failed to save secret");
+              } finally {
+                setSaving(false);
+              }
+            })();
+          }}
+        >
+          {saving ? "Saving…" : "Save secret"}
+        </button>
+      </div>
+    </Section>
   );
 }
