@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1788515021879,
+      "tag": "0000_vanta_desk_core",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1788515104854,
+      "tag": "0001_role_admin_writes_and_seed_replies",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1788516137699,
+      "tag": "0002_kb_and_ticket_workspace",
+      "breakpoints": true
+    }
+  ]
+}
