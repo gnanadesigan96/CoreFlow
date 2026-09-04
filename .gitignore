@@ -20,6 +20,10 @@ dist-ssr
 .wrangler/
 .dev.vars
 
+# Supabase CLI local state
+supabase/.temp/
+supabase/.branches/
+
 # Environment variables
 .env
 .env.*
