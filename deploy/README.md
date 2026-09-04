@@ -38,6 +38,7 @@ SUPABASE_URL=...
 VITE_SUPABASE_PROJECT_ID=...
 VITE_SUPABASE_PUBLISHABLE_KEY=...
 VITE_SUPABASE_URL=...
+ANTHROPIC_API_KEY=...
 EOF
 
 sudo chown -R zenith:zenith /opt/zenith-ticketing
@@ -54,6 +55,14 @@ The Supabase values are the same ones already in this project's local `.env`
 (get them from whoever has the Lovable project, or the Supabase dashboard for
 project `oypxpodvjjxwhzkawhnx`) — they are publishable/anon keys, not secret
 service-role keys, but are still kept out of git as a matter of hygiene.
+
+`ANTHROPIC_API_KEY` powers the AI Copilot feature (ticket insight, reply
+drafting, KB article generation) — it now calls the Claude API directly
+instead of Lovable's AI gateway. Get a key from
+[console.anthropic.com](https://console.anthropic.com). This is a real
+secret (unlike the Supabase publishable keys above) — never commit it.
+Without it, the rest of the app works fine; only the Copilot feature returns
+a "not configured" error.
 
 ## Verifying
 

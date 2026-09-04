@@ -1,6 +1,9 @@
 import { createServerFn } from "@tanstack/react-start";
+import Anthropic from "@anthropic-ai/sdk";
 import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+
+const MODEL = "claude-opus-5";
 
 const inputSchema = z.object({
   mode: z.enum(["insight", "reply", "article"]),
@@ -59,32 +62,45 @@ export const askCopilot = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((data: unknown) => inputSchema.parse(data))
   .handler(async ({ data }) => {
-    const apiKey = process.env["LOVABLE_API_KEY"];
+    const apiKey = process.env["ANTHROPIC_API_KEY"];
     if (!apiKey) throw new Error("The AI copilot is not configured for this workspace.");
 
-    const res = await fetch("https://ai.gateway.lovable.dev/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model: "google/gemini-2.5-flash",
-        messages: [
-          { role: "system", content: SYSTEM },
-          { role: "user", content: promptFor(data) },
-        ],
-      }),
-    });
+    const client = new Anthropic({ apiKey });
 
-    if (res.status === 429) throw new Error("Copilot rate limit reached — try again in a moment.");
-    if (res.status === 402) throw new Error("AI credits are exhausted for this workspace.");
-    if (!res.ok) throw new Error(`Copilot request failed (${res.status}).`);
+    try {
+      const response = await client.messages.create({
+        model: MODEL,
+        max_tokens: 4096,
+        output_config: { effort: "medium" },
+        system: SYSTEM,
+        messages: [{ role: "user", content: promptFor(data) }],
+      });
 
-    const json = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-    };
-    const text = json.choices?.[0]?.message?.content?.trim() ?? "";
-    if (!text) throw new Error("Copilot returned an empty response.");
-    return { mode: data.mode, text };
+      const text = response.content
+        .filter((block): block is Anthropic.TextBlock => block.type === "text")
+        .map((block) => block.text)
+        .join("")
+        .trim();
+
+      if (!text) throw new Error("Copilot returned an empty response.");
+      return { mode: data.mode, text };
+    } catch (error) {
+      if (error instanceof Anthropic.RateLimitError) {
+        throw new Error("Copilot rate limit reached — try again in a moment.");
+      }
+      if (error instanceof Anthropic.PermissionDeniedError) {
+        throw new Error(
+          error.type === "billing_error"
+            ? "AI credits are exhausted for this workspace."
+            : "The AI copilot does not have permission to run.",
+        );
+      }
+      if (error instanceof Anthropic.AuthenticationError) {
+        throw new Error("The AI copilot is not configured correctly for this workspace.");
+      }
+      if (error instanceof Anthropic.APIError) {
+        throw new Error(`Copilot request failed (${error.status}).`);
+      }
+      throw error;
+    }
   });
