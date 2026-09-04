@@ -1,0 +1,18 @@
+[Unit]
+Description=Zenith Ticketing (TanStack Start SSR server)
+After=network.target
+
+[Service]
+Type=simple
+User=zenith
+WorkingDirectory=/opt/zenith-ticketing
+EnvironmentFile=/opt/zenith-ticketing/.env
+Environment=NODE_ENV=production
+Environment=HOST=0.0.0.0
+Environment=PORT=3000
+ExecStart=/usr/bin/node /opt/zenith-ticketing/.output/server/index.mjs
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
