@@ -26,7 +26,7 @@ This has been verified to build and serve correctly.
 sudo useradd -r -m -d /opt/zenith-ticketing -s /usr/sbin/nologin zenith || true
 sudo mkdir -p /opt/zenith-ticketing
 sudo chown "$USER" /opt/zenith-ticketing
-git clone <this-repo-url> /opt/zenith-ticketing
+git clone https://github.com/gnanadesigan96/CoreFlow.git /opt/zenith-ticketing
 cd /opt/zenith-ticketing
 git checkout claude/zenith-ticketing-deploy-bz2o23
 
