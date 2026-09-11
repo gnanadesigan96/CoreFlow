@@ -47,14 +47,29 @@ Confirmed today against a live account (DC: in):
     .../passwords/list?...&chamberid=2052000000005364 -- no separate API call
     needed if you're doing this by hand once per folder.
 
-NOT yet confirmed (best guess, needs verification once we have real docs/crypto):
-  - The exact "Update Passwords" endpoint/payload shape. Based on the "Create
-    Secret" example Zoho support shared publicly, it likely follows the same
-    INPUT_DATA=<url-encoded JSON> convention, e.g.:
-      PUT /api/rest/json/v1/secrets/{secretid}
-      Content-Type: application/x-www-form-urlencoded
-      body: INPUT_DATA=<url-encoded JSON: {"secretData": {"password": "<ENCRYPTED>"}}>
-    Update update_password() below once confirmed.
+Update endpoint -- CONFIRMED against a live account (a real, verified write,
+not a guess):
+  PUT /api/rest/json/v1/secrets/{secretid}
+  Content-Type: application/x-www-form-urlencoded
+  body: INPUT_DATA=<JSON>, where the JSON is a FULL resend of the secret's
+  fields, not a partial patch -- omitting secrettypeid, for example, fails
+  with LESS_THAN_MIN_OCCURANCE ("Please fill 'INPUT_DATA.secrettypeid'").
+  Required-in-practice fields: secrettypeid, secretname, policyid,
+  classification, isshared, secretdata ({username, password, file}),
+  securenote, description, tags.
+
+  secrettypeid is NOT returned by either GET endpoint under that name --
+  but the GET response's "accounttype" field is confirmed to be the same
+  value (tested: reusing accounttype as secrettypeid succeeds). Likewise
+  GET's "notes" field is the same content as the write payload's
+  "securenote", and GET's "secretData" (capital D) is the same content as
+  the write payload's "secretdata" (lowercase d) -- just re-parse the JSON
+  string and pass it straight through.
+
+  Since we're not re-encrypting password/username here, this lets us
+  update description today by copying every other field from the row we
+  already fetched, unchanged -- no crypto library needed for that part.
+  build_full_update_payload() below does exactly this.
 
 Setup (same as the OAuth flow already validated):
   export ZOHO_VAULT_CLIENT_ID=...
@@ -177,35 +192,37 @@ def encrypt_secret_data(plaintext_value, master_password):
     )
 
 
-# Endpoint/payload NOT yet confirmed against real docs -- see module docstring.
-def update_password(dc, token, secret_id, encrypted_new_password):
-    input_data = json.dumps({"secretData": {"password": encrypted_new_password}})
+# Confirmed against a live account: the update endpoint wants a full resend
+# of the secret's fields, not a partial patch. Build that payload from a row
+# already fetched via list_secrets(), overriding only what actually changed.
+# See the module docstring for the accounttype->secrettypeid / notes->
+# securenote / secretData->secretdata field-name mapping this relies on.
+def build_full_update_payload(row, **overrides):
+    payload = {
+        "secrettypeid": row["accounttype"],
+        "secretname": row["secretname"],
+        "policyid": row["policyid"],
+        "classification": row.get("classification", "E"),
+        "isshared": row.get("isshared", "YES"),
+        "secretdata": json.loads(row["secretData"]),
+        "securenote": row.get("notes", ""),
+        "description": row.get("description", ""),
+        "tags": row.get("tags", ""),
+    }
+    payload.update(overrides)
+    return payload
+
+
+def update_secret(dc, token, secret_id, payload):
     status, body = http_request(
         f"https://{dc['vault']}/api/rest/json/v1/secrets/{secret_id}",
         method="PUT",
-        data={"INPUT_DATA": input_data},
+        data={"INPUT_DATA": json.dumps(payload)},
         headers={"Authorization": f"Zoho-oauthtoken {token}"},
     )
     result = body.get("operation", {}).get("result", {})
     if status != 200 or result.get("status") != "Success":
-        sys.exit(f"Zoho Vault API error updating password: {body}")
-
-
-# description is a top-level, UNENCRYPTED field (confirmed by Zoho support:
-# "except secretname, description, tags, & secreturls") -- no crypto library
-# needed for this one. Endpoint/payload shape follows the same convention as
-# update_password() above; verify once we have real docs.
-def update_description(dc, token, secret_id, description):
-    input_data = json.dumps({"description": description})
-    status, body = http_request(
-        f"https://{dc['vault']}/api/rest/json/v1/secrets/{secret_id}",
-        method="PUT",
-        data={"INPUT_DATA": input_data},
-        headers={"Authorization": f"Zoho-oauthtoken {token}"},
-    )
-    result = body.get("operation", {}).get("result", {})
-    if status != 200 or result.get("status") != "Success":
-        sys.exit(f"Zoho Vault API error updating description: {body}")
+        sys.exit(f"Zoho Vault API error updating secret: {body}")
 
 
 def main():
@@ -239,15 +256,17 @@ def main():
 
     # description is plaintext -- works today, no crypto library needed.
     if description:
-        update_description(dc, token, row["secretid"], description)
+        update_secret(dc, token, row["secretid"], build_full_update_payload(row, description=description))
         print("Description updated.")
 
     master_password = os.environ.get("ZOHO_VAULT_MASTER_PASSWORD")
     if not master_password:
         sys.exit("Set ZOHO_VAULT_MASTER_PASSWORD (needed for encrypt_secret_data())")
 
-    encrypted = encrypt_secret_data(new_password, master_password)
-    update_password(dc, token, row["secretid"], encrypted)
+    existing_secret_data = json.loads(row["secretData"])
+    encrypted_password = encrypt_secret_data(new_password, master_password)
+    new_secret_data = {**existing_secret_data, "password": encrypted_password}
+    update_secret(dc, token, row["secretid"], build_full_update_payload(row, secretdata=new_secret_data))
     print("Password updated.")
 
 
