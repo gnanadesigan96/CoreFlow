@@ -57,7 +57,12 @@ Setup (same as the OAuth flow already validated):
 
 Usage:
   python3 scripts/zoho_vault_rotate_password.py \
-    --folder-id 2052000000005364 --secret-name cs.support.vault [--new-password '...'] [--apply]
+    --folder-id 2052000000005364 --secret-name cs.support.vault \
+    --old-password '...' [--new-password '...'] [--apply]
+
+The description update (old password: <value>) is plaintext and works
+today with no crypto library. Setting the new password itself still
+raises NotImplementedError until encrypt_secret_data() is filled in.
 """
 
 import argparse
@@ -82,6 +87,7 @@ def parse_args():
     p.add_argument("--folder-id", required=True, help="Vault chamberId (folder ID) -- read it from the folder's URL in the Vault web UI")
     p.add_argument("--secret-name", required=True, help="Secret's display name (secretname) to match -- NOT the encrypted login username")
     p.add_argument("--new-password", help="New password to set (else prompted)")
+    p.add_argument("--old-password", help="Current password value (you supply it -- the API can't decrypt it for us). Written into the secret's description as 'old password: <value>'")
     p.add_argument("--dc", default=os.environ.get("ZOHO_VAULT_DC", "com"), help="Zoho data center (default: com, or $ZOHO_VAULT_DC)")
     p.add_argument("--apply", action="store_true", help="Actually write the new password (default: dry run)")
     return p.parse_args()
@@ -172,6 +178,23 @@ def update_password(dc, token, secret_id, encrypted_new_password):
         sys.exit(f"Zoho Vault API error updating password: {body}")
 
 
+# description is a top-level, UNENCRYPTED field (confirmed by Zoho support:
+# "except secretname, description, tags, & secreturls") -- no crypto library
+# needed for this one. Endpoint/payload shape follows the same convention as
+# update_password() above; verify once we have real docs.
+def update_description(dc, token, secret_id, description):
+    input_data = json.dumps({"description": description})
+    status, body = http_request(
+        f"https://{dc['vault']}/api/rest/json/v1/secrets/{secret_id}",
+        method="PUT",
+        data={"INPUT_DATA": input_data},
+        headers={"Authorization": f"Zoho-oauthtoken {token}"},
+    )
+    result = body.get("operation", {}).get("result", {})
+    if status != 200 or result.get("status") != "Success":
+        sys.exit(f"Zoho Vault API error updating description: {body}")
+
+
 def main():
     args = parse_args()
     dc = DC_HOSTS.get(args.dc)
@@ -191,10 +214,20 @@ def main():
     print(f"Found secret: {row['secretname']} (id={row['secretid']})")
 
     new_password = args.new_password or input("New password: ")
+    old_password = args.old_password or input("Old password (for the description, or leave blank to skip): ")
+    description = f"old password: {old_password}" if old_password else None
 
     if not args.apply:
-        print("(dry run -- pass --apply to actually write the new password)")
+        print("(dry run -- pass --apply to actually write changes)")
+        if description:
+            print(f"  would set description to: {description!r}")
+        print("  would set a new password (pending Zoho crypto library -- see module docstring)")
         return
+
+    # description is plaintext -- works today, no crypto library needed.
+    if description:
+        update_description(dc, token, row["secretid"], description)
+        print("Description updated.")
 
     master_password = os.environ.get("ZOHO_VAULT_MASTER_PASSWORD")
     if not master_password:
