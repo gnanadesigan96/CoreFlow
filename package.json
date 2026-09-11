@@ -9,7 +9,8 @@
     "build:dev": "vite build --mode development",
     "preview": "vite preview",
     "lint": "eslint .",
-    "format": "prettier --write ."
+    "format": "prettier --write .",
+    "vault:rotate-password": "node scripts/zoho-vault-rotate-password.mjs"
   },
   "overrides": {
     "rolldown": "1.2.1"
