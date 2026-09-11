@@ -140,13 +140,16 @@ async function getAccessToken(dc) {
     );
   }
 
-  const url = new URL(`https://${dc.accounts}/oauth/v2/token`);
-  url.searchParams.set("grant_type", "refresh_token");
-  url.searchParams.set("client_id", clientId);
-  url.searchParams.set("client_secret", clientSecret);
-  url.searchParams.set("refresh_token", refreshToken);
-
-  const res = await fetch(url, { method: "POST" });
+  const res = await fetch(`https://${dc.accounts}/oauth/v2/token`, {
+    method: "POST",
+    headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({
+      grant_type: "refresh_token",
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+    }),
+  });
   const body = await res.json();
   if (!res.ok || !body.access_token) {
     throw new Error(`Failed to refresh Zoho access token: ${JSON.stringify(body)}`);
