@@ -29,11 +29,19 @@ Confirmed today against a live account (DC: in):
   - List:  GET https://vault.zoho.<dc>/api/rest/json/v1/secrets
            required params: isAsc, pageNum, rowPerPage (NOT sortColumn -- that
            param does not exist and causes EXTRA_PARAM_FOUND)
-           optional: passwordName, filter, passwordType, chamberId (= folder ID)
+           pageNum is 0-INDEXED -- pageNum=1 silently skips the first page
+           (returns Success with an empty Details array, easy to miss).
+           optional: passwordName, filter, passwordType, chamberId (= folder ID,
+           must be exactly "chamberId" -- lowercase "chamberid" is rejected
+           with EXTRA_PARAM_FOUND even though that's how the web UI's own
+           URL spells it)
   - Response envelope: {"operation": {"result": {...}, "Details": [ {...secret...} ]}}
-    Each secret row includes secretid, secretname (plaintext), notes, userid,
-    and a secretData field which is a JSON *string* (not a nested object)
-    shaped like '{"password":"<encrypted>","file":"","username":"<encrypted>"}'.
+    Each secret row includes secretid, secretname (plaintext -- but this is
+    the secret's *display name*, e.g. "Test"; it is NOT the login username,
+    which lives encrypted inside secretData below), description (plaintext),
+    notes (encrypted -- this is the separate "secure note" field), and a
+    secretData field which is a JSON *string* (not a nested object) shaped
+    like '{"password":"<encrypted>","file":"","username":"<encrypted>"}'.
   - Folder ("chamber") ID can be read straight out of the Vault web UI's URL
     when browsing that folder, e.g.
     .../passwords/list?...&chamberid=2052000000005364 -- no separate API call
@@ -131,7 +139,9 @@ def get_access_token(dc):
 
 
 def list_secrets(dc, token, folder_id=None, password_name=None):
-    params = {"isAsc": "true", "pageNum": "1", "rowPerPage": "200"}
+    # pageNum is 0-indexed -- confirmed against a live account. Passing "1"
+    # here (an easy off-by-one assumption) skips the first page of results.
+    params = {"isAsc": "true", "pageNum": "0", "rowPerPage": "200"}
     if folder_id:
         params["chamberId"] = folder_id
     if password_name:
