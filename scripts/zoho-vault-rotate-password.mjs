@@ -254,9 +254,9 @@ async function rotateSecret(dc, token, summary, newPassword, dryRun) {
 
 async function main() {
   const args = parseArgs(process.argv.slice(2));
-  const dc = DC_HOSTS[args.dc ?? "com"];
-  if (!dc)
-    throw new Error(`Unknown --dc "${args.dc}". Known values: ${Object.keys(DC_HOSTS).join(", ")}`);
+  const dcCode = args.dc ?? process.env.ZOHO_VAULT_DC ?? "com";
+  const dc = DC_HOSTS[dcCode];
+  if (!dc) throw new Error(`Unknown data center "${dcCode}". Known values: ${Object.keys(DC_HOSTS).join(", ")}`);
 
   const token = await getAccessToken(dc);
   const matches = await findMatches(dc, token, args.folder, args.username);
