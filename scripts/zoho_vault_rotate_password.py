@@ -138,14 +138,17 @@ def get_access_token(dc):
     return body["access_token"]
 
 
-def list_secrets(dc, token, folder_id=None, password_name=None):
+def list_secrets(dc, token, folder_id=None):
     # pageNum is 0-indexed -- confirmed against a live account. Passing "1"
     # here (an easy off-by-one assumption) skips the first page of results.
+    #
+    # No server-side name search: "passwordName" is documented as a valid
+    # param but every casing we tried (passwordName/passwordname/PASSWORDNAME)
+    # was rejected with EXTRA_PARAM_FOUND against a live account. Not needed
+    # anyway -- we filter by secretname locally in find_secret_by_name().
     params = {"isAsc": "true", "pageNum": "0", "rowPerPage": "200"}
     if folder_id:
         params["chamberId"] = folder_id
-    if password_name:
-        params["passwordName"] = password_name
 
     url = f"https://{dc['vault']}/api/rest/json/v1/secrets?{urllib.parse.urlencode(params)}"
     status, body = http_request(url, headers={"Authorization": f"Zoho-oauthtoken {token}"})
@@ -212,7 +215,7 @@ def main():
         sys.exit(f"Unknown data center \"{args.dc}\". Known values: {', '.join(DC_HOSTS)}")
 
     token = get_access_token(dc)
-    secrets = list_secrets(dc, token, folder_id=args.folder_id, password_name=args.secret_name)
+    secrets = list_secrets(dc, token, folder_id=args.folder_id)
     matches = find_secret_by_name(secrets, args.secret_name)
 
     if not matches:
