@@ -28,6 +28,10 @@ supabase/.branches/
 .env
 .env.*
 
+# Zoho Vault crypto library (ported from Zoho's privately-shared support
+# files, ticket #167197808) -- local-only, not committed to git.
+scripts/zvcrypto.py
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

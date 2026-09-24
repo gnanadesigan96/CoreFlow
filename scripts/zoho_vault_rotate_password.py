@@ -5,14 +5,24 @@ Does NOT read/display the current password -- Vault's own "History" panel on
 the secret already keeps every past password automatically, so there's no
 need to fetch and decrypt it here.
 
-STATUS: encrypt_secret_data() below is NOT implemented. Zoho Vault uses a
-host-proof-hosting / zero-knowledge scheme: the API only ever stores
-encrypted values and never accepts a plaintext password over the wire, and
-Zoho does not publish the client-side crypto routines -- they only hand them
-out on request via support@zohovault.com (confirmed directly by their
-support team). Everything else in this script (auth, listing, matching, the
-request shapes) is wired up and tested against the real API today; only that
-one function is waiting on Zoho's response.
+STATUS: description updates and secret lookup are confirmed working against
+a live account (real, verified writes). The encryption piece
+(encrypt_secret_data(), get_login(), open_vault(), derive_keys()) uses
+zvcrypto.py, which was ported from Zoho's official crypto files (shared
+privately via support ticket #167197808) and unit-tested for correctness in
+isolation (PBKDF2, AES-CTR round-trip, RSA-OAEP round-trip all verified).
+BUT the get_login()/open_vault() calls themselves -- the two API calls that
+feed real account data into that crypto -- are NOT yet verified end-to-end
+against a live account; their response shape is inferred from Zoho's PDF
+description plus an old community-forum example, not something we've seen a
+real response for. Test with --apply on a throwaway secret first.
+
+IMPORTANT PREREQUISITE: per Zoho's own docs, deriving these keys needs the
+'ZohoVault.user.READ' OAuth scope in addition to the secrets scope already
+in use -- if your refresh token was generated without it, you'll need to
+redo the Self Client grant-code -> refresh-token exchange with that scope
+added before get_login()/open_vault() will work (expect INVALID_OAUTHSCOPE
+otherwise, the same error we hit earlier on the /secrettypes endpoint).
 
 Matching is done by folder + the secret's *display name* (secretname), not
 by the login username -- the username field lives inside the encrypted
@@ -71,21 +81,17 @@ not a guess):
   already fetched, unchanged -- no crypto library needed for that part.
   build_full_update_payload() below does exactly this.
 
-Setup (same as the OAuth flow already validated):
+Setup:
   export ZOHO_VAULT_CLIENT_ID=...
   export ZOHO_VAULT_CLIENT_SECRET=...
-  export ZOHO_VAULT_REFRESH_TOKEN=...
-  export ZOHO_VAULT_DC=in                 # or com/eu/com.au/jp/ca
-  export ZOHO_VAULT_MASTER_PASSWORD=...   # needed once encrypt_secret_data() is implemented
+  export ZOHO_VAULT_REFRESH_TOKEN=...      # needs ZohoVault.secrets.ALL + ZohoVault.user.READ
+  export ZOHO_VAULT_DC=in                  # or com/eu/com.au/jp/ca
+  export ZOHO_VAULT_MASTER_PASSWORD=...    # your Vault account's actual Master Password
 
 Usage:
   python3 scripts/zoho_vault_rotate_password.py \
     --folder-id 2052000000005364 --secret-name cs.support.vault \
     --old-password '...' [--new-password '...'] [--apply]
-
-The description update (old password: <value>) is plaintext and works
-today with no crypto library. Setting the new password itself still
-raises NotImplementedError until encrypt_secret_data() is filled in.
 """
 
 import argparse
@@ -94,6 +100,8 @@ import os
 import sys
 import urllib.parse
 import urllib.request
+
+import zvcrypto
 
 DC_HOSTS = {
     "com": {"accounts": "accounts.zoho.com", "vault": "vault.zoho.com"},
@@ -177,19 +185,67 @@ def find_secret_by_name(secrets, secret_name):
     return [row for row in secrets if row.get("secretname") == secret_name]
 
 
-def encrypt_secret_data(plaintext_value, master_password):
-    """TODO: implement with Zoho's official crypto library once received.
+# NOT YET VERIFIED against a live account -- see module docstring. Uses a
+# different, older API path (/api/json/login, not /api/rest/json/v1/...)
+# and, per Zoho's PDF example, a standard OAuth "Bearer" scheme rather than
+# the "Zoho-oauthtoken" scheme every other endpoint in this file uses.
+def get_login(dc, token):
+    url = f"https://{dc['vault']}/api/json/login?OPERATION_NAME=GET_LOGIN"
+    return http_request(url, headers={"Authorization": f"Bearer {token}"})
 
-    Community forum threads describe the outline (PBKDF2/AES, a per-account
-    SALT + ITERATION count fetched via a GET_LOGIN-style call, master key
-    derivation from the master password), but not the full algorithm --
-    Zoho's support team confirmed the actual crypto files are only shared
-    privately on request. Do not guess at this; get the real files first.
+
+def open_vault(dc, token):
+    url = f"https://{dc['vault']}/api/json/login?OPERATION_NAME=OPEN_VAULT"
+    return http_request(url, headers={"Authorization": f"Bearer {token}"})
+
+
+def _find_field(body, *keys):
+    """GET_LOGIN/OPEN_VAULT's response envelope isn't confirmed (unlike the
+    /api/rest/json/v1/... endpoints elsewhere in this file) -- search the
+    handful of shapes Zoho's docs/community examples suggest are plausible.
     """
-    raise NotImplementedError(
-        "encrypt_secret_data() needs Zoho's official crypto library -- "
-        "see the module docstring and email support@zohovault.com"
-    )
+    candidates = [body]
+    if isinstance(body, dict):
+        candidates.append(body.get("details", {}))
+        candidates.append(body.get("Details", {}))
+        candidates.append(body.get("operation", {}).get("Details", {}))
+        candidates.append(body.get("operation", {}).get("result", {}))
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        for key in keys:
+            if key in candidate:
+                return candidate[key]
+    return None
+
+
+def derive_keys(dc, token, master_password):
+    """Derive the Master Key and Org Key for this account.
+
+    NOT YET VERIFIED end-to-end against a live account -- see module
+    docstring. If this fails with INVALID_OAUTHSCOPE, your refresh token
+    needs the ZohoVault.user.READ scope added (see module docstring).
+    """
+    status, login_body = get_login(dc, token)
+    if status != 200:
+        sys.exit(f"GET_LOGIN failed ({status}): {login_body}")
+    salt = _find_field(login_body, "SALT")
+    iterations = _find_field(login_body, "ITERATION") or 310000
+    if not salt:
+        sys.exit(f"Could not find SALT in GET_LOGIN response -- response shape may differ from what we expected: {login_body}")
+    master_key = zvcrypto.pbkdf2(master_password, salt, int(iterations))
+
+    status, vault_body = open_vault(dc, token)
+    if status != 200:
+        sys.exit(f"OPEN_VAULT failed ({status}): {vault_body}")
+    enc_private_key = _find_field(vault_body, "PRIVATEKEY")
+    enc_sharing_key = _find_field(vault_body, "SHARINGKEY")
+    if not (enc_private_key and enc_sharing_key):
+        sys.exit(f"Could not find PRIVATEKEY/SHARINGKEY in OPEN_VAULT response -- response shape may differ from what we expected: {vault_body}")
+
+    private_key = zvcrypto.aes_decrypt(enc_private_key, master_key)
+    org_key = zvcrypto.rsa_decrypt(enc_sharing_key, private_key)
+    return master_key, org_key
 
 
 # Confirmed against a live account: the update endpoint wants a full resend
@@ -251,7 +307,7 @@ def main():
         print("(dry run -- pass --apply to actually write changes)")
         if description:
             print(f"  would set description to: {description!r}")
-        print("  would set a new password (pending Zoho crypto library -- see module docstring)")
+        print("  would derive Master/Org Key and set a new password (get_login/open_vault not yet verified live -- see module docstring)")
         return
 
     # description is plaintext -- works today, no crypto library needed.
@@ -261,10 +317,15 @@ def main():
 
     master_password = os.environ.get("ZOHO_VAULT_MASTER_PASSWORD")
     if not master_password:
-        sys.exit("Set ZOHO_VAULT_MASTER_PASSWORD (needed for encrypt_secret_data())")
+        sys.exit("Set ZOHO_VAULT_MASTER_PASSWORD (your Vault account's actual Master Password)")
+
+    master_key, org_key = derive_keys(dc, token, master_password)
+    # ISSHARED=YES (enterprise/shared) uses the Org Key; ISSHARED=NO
+    # (personal) uses the Master Key -- see zvcrypto.py / module docstring.
+    encryption_key = org_key if row.get("isshared") == "YES" else master_key
 
     existing_secret_data = json.loads(row["secretData"])
-    encrypted_password = encrypt_secret_data(new_password, master_password)
+    encrypted_password = zvcrypto.aes_encrypt(new_password, encryption_key)
     new_secret_data = {**existing_secret_data, "password": encrypted_password}
     update_secret(dc, token, row["secretid"], build_full_update_payload(row, secretdata=new_secret_data))
     print("Password updated.")
