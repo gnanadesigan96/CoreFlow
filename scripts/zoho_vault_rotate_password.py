@@ -200,12 +200,16 @@ def open_vault(dc, token):
 
 
 def _find_field(body, *keys):
-    """GET_LOGIN/OPEN_VAULT's response envelope isn't confirmed (unlike the
-    /api/rest/json/v1/... endpoints elsewhere in this file) -- search the
-    handful of shapes Zoho's docs/community examples suggest are plausible.
+    """Confirmed against a live account: GET_LOGIN/OPEN_VAULT responses are
+    shaped {"operation": {"result": {...}, "name": ..., "details": {...}}}
+    -- note lowercase "details" nested INSIDE "operation", unlike the
+    /api/rest/json/v1/... endpoints elsewhere in this file which use a
+    top-level capital-D "Details". The other candidates below are kept as
+    fallbacks in case OPEN_VAULT's shape ever differs from GET_LOGIN's.
     """
     candidates = [body]
     if isinstance(body, dict):
+        candidates.append(body.get("operation", {}).get("details", {}))
         candidates.append(body.get("details", {}))
         candidates.append(body.get("Details", {}))
         candidates.append(body.get("operation", {}).get("Details", {}))
