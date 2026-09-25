@@ -60,11 +60,9 @@ Setup:
   export ZOHO_VAULT_DC=in                  # or com/eu/com.au/jp/ca
   export ZOHO_VAULT_MASTER_PASSWORD=...    # your Vault account's actual Master Password
 
-  export SMTP_HOST=smtp.office365.com      # defaults shown are already this
-  export SMTP_PORT=587
-  export SMTP_USER=productsupport@corestack.io
-  export SMTP_FROM=productsupport@corestack.io
   export SMTP_PASSWORD=...                 # required to actually send the email
+                                            # (host/port/user/from are fixed
+                                            # in-script -- see SMTP_HOST etc.)
 
 Usage:
   python3 scripts/zoho_vault_rotate_password.py \
@@ -120,6 +118,13 @@ DC_HOSTS = {
 
 PASSWORD_LENGTH = 15
 PASSWORD_SYMBOLS = "!@#$&"
+
+# Fixed SMTP config -- only the mailbox password is secret enough to need an
+# env var (SMTP_PASSWORD); everything else about this mailbox is constant.
+SMTP_HOST = "smtp.office365.com"
+SMTP_PORT = 587
+SMTP_USER = "productsupport@corestack.io"
+SMTP_FROM = "productsupport@corestack.io"
 
 
 def parse_args():
@@ -640,10 +645,10 @@ def build_html_summary(all_results, folder_names, run_started_at, total, succeed
 
 
 def send_summary_email(to_addr, subject, text_body, html_body):
-    smtp_host = os.environ.get("SMTP_HOST", "smtp.office365.com")
-    smtp_port = int(os.environ.get("SMTP_PORT", "587"))
-    smtp_user = os.environ.get("SMTP_USER", "productsupport@corestack.io")
-    smtp_from = os.environ.get("SMTP_FROM", smtp_user)
+    smtp_host = SMTP_HOST
+    smtp_port = SMTP_PORT
+    smtp_user = SMTP_USER
+    smtp_from = SMTP_FROM
     smtp_password = os.environ.get("SMTP_PASSWORD")
     if not smtp_password:
         print("SMTP_PASSWORD not set -- skipping summary email", file=sys.stderr)
