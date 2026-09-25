@@ -64,10 +64,17 @@ Setup:
                                             # (host/port/user/from are fixed
                                             # in-script -- see SMTP_HOST etc.)
 
+Each secret's API endpoint is resolved strictly from its own URL stored in
+Vault (plaintext secreturl/secretmultipleurl, or an encrypted "Additional
+Field" under encryptedurls -- whichever the secret actually has), matched
+against REGION_ENDPOINTS. A secret with no stored URL, or one that doesn't
+match a known region, fails outright rather than guessing an endpoint --
+there is no override or default endpoint.
+
 Usage:
   python3 scripts/zoho_vault_rotate_password.py \
     --folder-id 2052000000005364 --folder-id 2052000000009999 \
-    [--app-endpoint api.corestack.io] [--apply]
+    [--apply]
 
 Without --apply this is a dry run: it decrypts and reports what would
 happen for every secret, but makes no calls to the application and no
@@ -130,7 +137,6 @@ SMTP_FROM = "productsupport@corestack.io"
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--folder-id", action="append", required=True, help="Vault chamberId (folder ID) -- read it from the folder's URL in the Vault web UI. Repeat for multiple folders.")
-    p.add_argument("--app-endpoint", default=os.environ.get("APP_ENDPOINT"), help="Fallback API host (no scheme) used only if a secret's stored URL doesn't match a known region in REGION_ENDPOINTS. Omit to fail those secrets instead of guessing.")
     p.add_argument("--dc", default=os.environ.get("ZOHO_VAULT_DC", "com"), help="Zoho data center (default: com, or $ZOHO_VAULT_DC)")
     p.add_argument("--apply", action="store_true", help="Actually change app + Vault passwords (default: dry run)")
     p.add_argument("--email-to", default="gnanadesigan@corestack.io", help="Summary email recipient")
@@ -357,9 +363,11 @@ def _normalize_host(value):
     return value.split("/")[0]
 
 
-def resolve_app_endpoint(row, fallback=None, key=None):
-    """Match the secret's stored URL against REGION_ENDPOINTS to find which
-    API host to call for this account.
+def resolve_app_endpoint(row, key=None):
+    """Match the secret's own stored URL against REGION_ENDPOINTS to find
+    which API host to call for this account. There is no override or
+    default endpoint -- a secret is only ever routed to the endpoint its
+    own Vault data resolves to.
 
     Confirmed against a live account: some secrets store the URL as the
     plaintext `secreturl`/`secretmultipleurl` fields (Vault's built-in
@@ -371,13 +379,12 @@ def resolve_app_endpoint(row, fallback=None, key=None):
     no decryption; encryptedurls is only consulted if those are empty and a
     key was given.
 
-    Returns (endpoint, source) where `source` is the secret's own URL that
-    matched (proof this came from the secret's data, not a guess), or None
-    if `endpoint` came from `fallback` (the --app-endpoint override) instead
-    because no stored URL on the secret matched a known region. `endpoint`
-    itself is None (with source None) if there's no fallback either --
-    callers should treat that as "can't safely proceed" rather than
-    silently guessing a region.
+    Returns (endpoint, matched_url, reason). On success, `endpoint` is the
+    resolved API host and `matched_url` is the secret's own URL that
+    matched (proof this came from Vault, not a guess). On failure,
+    `endpoint`/`matched_url` are None and `reason` explains why: either the
+    secret has no stored URL at all, or its stored URL(s) don't match any
+    entry in REGION_ENDPOINTS.
     """
     candidates = []
     if row.get("secreturl"):
@@ -397,13 +404,16 @@ def resolve_app_endpoint(row, fallback=None, key=None):
             if decrypted:
                 candidates.append(decrypted)
 
+    if not candidates:
+        return None, None, "no URL is stored on this secret in Vault -- cannot determine which API endpoint to use"
+
     for candidate in candidates:
         host = _normalize_host(candidate)
         for known_url, endpoint in REGION_ENDPOINTS.items():
             if host == known_url or host.endswith("." + known_url):
-                return endpoint, candidate
+                return endpoint, candidate, None
 
-    return fallback, None
+    return None, None, f"stored URL(s) {candidates!r} don't match any known region in REGION_ENDPOINTS"
 
 
 def change_app_password(app_endpoint, username, current_password, new_password):
@@ -446,7 +456,7 @@ def change_app_password(app_endpoint, username, current_password, new_password):
     return False, f"change_password failed: HTTP {change_resp.status_code} {change_resp.text[:200]}"
 
 
-def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
+def rotate_secret(dc, token, row, master_key, org_key, apply):
     name = row.get("secretname") or row["secretid"]
 
     try:
@@ -454,20 +464,12 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
     except Exception as e:
         return {"name": name, "endpoint": None, "status": "failed", "detail": f"decrypt error: {e}"}
 
-    endpoint, matched_url = resolve_app_endpoint(row, fallback=app_endpoint, key=key)
+    endpoint, matched_url, reason = resolve_app_endpoint(row, key=key)
     if not endpoint:
-        return {
-            "name": name,
-            "endpoint": None,
-            "status": "failed",
-            "detail": "no API endpoint match for this secret's stored URL, and no --app-endpoint fallback given",
-        }
-    # Shown in every report line so a region mismatch is visible at a glance:
-    # "endpoint (via URL)" proves it came from the secret's own data, while
-    # "endpoint (fallback -- no URL match)" is a red flag for a multi-region
-    # folder, since it means every unmatched secret would silently share one
-    # endpoint rather than each using its own region's.
-    endpoint_display = f"{endpoint} (via {matched_url})" if matched_url else f"{endpoint} (fallback -- no URL match)"
+        return {"name": name, "endpoint": None, "status": "failed", "detail": reason}
+    # Shown in every report line as proof the endpoint came from this
+    # secret's own Vault data, not a guess.
+    endpoint_display = f"{endpoint} (via {matched_url})"
 
     if not apply:
         return {
@@ -501,17 +503,16 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
     return {"name": name, "endpoint": endpoint_display, "status": "success", "detail": ""}
 
 
-def rotate_folder(dc, token, folder_id, master_key, org_key, app_endpoint, apply):
+def rotate_folder(dc, token, folder_id, master_key, org_key, apply):
     rows = list_secrets(dc, token, folder_id=folder_id)
     results = []
     for row in rows:
-        result = rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply)
+        result = rotate_secret(dc, token, row, master_key, org_key, apply)
         results.append(result)
         suffix = f" -- {result['detail']}" if result["detail"] else ""
-        # endpoint already carries "(via <matched vault URL>)" or
-        # "(fallback -- no URL match)" -- printed here too so a dry run
-        # shows, per secret, exactly which stored Vault URL picked which
-        # API endpoint, before anything real gets called.
+        # endpoint carries "(via <matched vault URL>)" -- printed here too so
+        # a dry run shows, per secret, exactly which stored Vault URL picked
+        # which API endpoint, before anything real gets called.
         endpoint_str = f" [{result['endpoint']}]" if result.get("endpoint") else ""
         print(f"  [{result['status']}]{endpoint_str} {result['name']}{suffix}")
     return results
@@ -737,7 +738,7 @@ def main():
     all_results = {}
     for folder_id in args.folder_id:
         print(f"Folder {folder_names.get(str(folder_id), folder_id)}:")
-        all_results[folder_id] = rotate_folder(dc, token, folder_id, master_key, org_key, args.app_endpoint, args.apply)
+        all_results[folder_id] = rotate_folder(dc, token, folder_id, master_key, org_key, args.apply)
         print()
 
     summary, total, succeeded, failed = build_summary(all_results, folder_names)
