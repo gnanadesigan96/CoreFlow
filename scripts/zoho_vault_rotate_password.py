@@ -357,10 +357,19 @@ def _normalize_host(value):
     return value.split("/")[0]
 
 
-def resolve_app_endpoint(row, fallback=None):
-    """Match the secret's stored URL (secreturl, or any entry in
-    secretmultipleurl -- both plaintext fields, no crypto involved) against
-    REGION_ENDPOINTS to find which API host to call for this account.
+def resolve_app_endpoint(row, fallback=None, key=None):
+    """Match the secret's stored URL against REGION_ENDPOINTS to find which
+    API host to call for this account.
+
+    Confirmed against a live account: some secrets store the URL as the
+    plaintext `secreturl`/`secretmultipleurl` fields (Vault's built-in
+    Website field), but others -- this account included -- leave those
+    empty and instead store it as an ENCRYPTED "Additional Field" under
+    `encryptedurls`, using the exact same AES scheme as the username/
+    password (needs `key`, the master/org key this secret's isshared value
+    selects, to decrypt). Plaintext fields are tried first since they need
+    no decryption; encryptedurls is only consulted if those are empty and a
+    key was given.
 
     Returns (endpoint, source) where `source` is the secret's own URL that
     matched (proof this came from the secret's data, not a guess), or None
@@ -376,6 +385,17 @@ def resolve_app_endpoint(row, fallback=None):
     for url in row.get("secretmultipleurl") or []:
         if url:
             candidates.append(url)
+
+    if not candidates and key:
+        for enc_url in row.get("encryptedurls") or []:
+            if not enc_url:
+                continue
+            try:
+                decrypted = zvcrypto.aes_decrypt(enc_url, key)
+            except Exception:
+                continue
+            if decrypted:
+                candidates.append(decrypted)
 
     for candidate in candidates:
         host = _normalize_host(candidate)
@@ -434,7 +454,7 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
     except Exception as e:
         return {"name": name, "endpoint": None, "status": "failed", "detail": f"decrypt error: {e}"}
 
-    endpoint, matched_url = resolve_app_endpoint(row, fallback=app_endpoint)
+    endpoint, matched_url = resolve_app_endpoint(row, fallback=app_endpoint, key=key)
     if not endpoint:
         return {
             "name": name,
