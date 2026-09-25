@@ -77,19 +77,37 @@ writes to Vault. Add --apply to actually rotate passwords for real.
 """
 
 import argparse
+import html
 import json
 import os
+import re
 import smtplib
 import string
 import sys
 import urllib.parse
 import urllib.request
+from datetime import datetime, timezone
+from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from secrets import choice as _secure_choice
 
 import requests
 
 import zvcrypto
+
+# Region -> API host, keyed by the customer-facing URL stored on each Vault
+# secret (its "URL"), mapping to the API host to actually call for that
+# region (its "API Endpoint"). Given directly by the user.
+REGION_ENDPOINTS = {
+    "cloud.corestack.io": "api.corestack.io",
+    "portal.corestack.io": "portal-api.corestack.io",
+    "mea.corestack.io": "mea-api.corestack.io",
+    "msprod.corestack.io": "api-msprod.corestack.io",
+    "cmp.hootstack.com": "api-cmp.hootstack.com",
+    "in.corestack.io": "api-in.corestack.io",
+    "useast.corestack.io": "api-useast.corestack.io",
+    "us3.corestack.io": "api-us3.corestack.io",
+}
 
 DC_HOSTS = {
     "com": {"accounts": "accounts.zoho.com", "vault": "vault.zoho.com"},
@@ -107,7 +125,7 @@ PASSWORD_SYMBOLS = "!@#$&"
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--folder-id", action="append", required=True, help="Vault chamberId (folder ID) -- read it from the folder's URL in the Vault web UI. Repeat for multiple folders.")
-    p.add_argument("--app-endpoint", default=os.environ.get("APP_ENDPOINT", "api.corestack.io"), help="Application API host, no scheme (default: api.corestack.io, or $APP_ENDPOINT)")
+    p.add_argument("--app-endpoint", default=os.environ.get("APP_ENDPOINT"), help="Fallback API host (no scheme) used only if a secret's stored URL doesn't match a known region in REGION_ENDPOINTS. Omit to fail those secrets instead of guessing.")
     p.add_argument("--dc", default=os.environ.get("ZOHO_VAULT_DC", "com"), help="Zoho data center (default: com, or $ZOHO_VAULT_DC)")
     p.add_argument("--apply", action="store_true", help="Actually change app + Vault passwords (default: dry run)")
     p.add_argument("--email-to", default="gnanadesigan@corestack.io", help="Summary email recipient")
@@ -285,6 +303,37 @@ def decrypt_credentials(row, master_key, org_key):
     return username, password, key, secret_data
 
 
+def _normalize_host(value):
+    value = value.strip().lower()
+    value = re.sub(r"^[a-z]+://", "", value)
+    return value.split("/")[0]
+
+
+def resolve_app_endpoint(row, fallback=None):
+    """Match the secret's stored URL (secreturl, or any entry in
+    secretmultipleurl -- both plaintext fields, no crypto involved) against
+    REGION_ENDPOINTS to find which API host to call for this account.
+    Returns `fallback` (the --app-endpoint override) if no candidate URL on
+    the secret matches a known region, or None if there's no fallback
+    either -- callers should treat None as "can't safely proceed" rather
+    than silently guessing a region.
+    """
+    candidates = []
+    if row.get("secreturl"):
+        candidates.append(row["secreturl"])
+    for url in row.get("secretmultipleurl") or []:
+        if url:
+            candidates.append(url)
+
+    for candidate in candidates:
+        host = _normalize_host(candidate)
+        for known_url, endpoint in REGION_ENDPOINTS.items():
+            if host == known_url or host.endswith("." + known_url):
+                return endpoint
+
+    return fallback
+
+
 def change_app_password(app_endpoint, username, current_password, new_password):
     """Calls the application's auth + change-password endpoints. Returns
     (ok: bool, detail: str). Ported from the API code shared for this --
@@ -331,20 +380,30 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
     try:
         username, current_password, key, secret_data = decrypt_credentials(row, master_key, org_key)
     except Exception as e:
-        return {"name": name, "status": "failed", "detail": f"decrypt error: {e}"}
+        return {"name": name, "endpoint": None, "status": "failed", "detail": f"decrypt error: {e}"}
+
+    endpoint = resolve_app_endpoint(row, fallback=app_endpoint)
+    if not endpoint:
+        return {
+            "name": name,
+            "endpoint": None,
+            "status": "failed",
+            "detail": "no API endpoint match for this secret's stored URL, and no --app-endpoint fallback given",
+        }
 
     if not apply:
         return {
             "name": name,
+            "endpoint": endpoint,
             "status": "dry-run",
-            "detail": f"would authenticate as {username!r}, change the app password, then update Vault",
+            "detail": f"would authenticate as {username!r} against {endpoint}, change the app password, then update Vault",
         }
 
     new_password = generate_password()
 
-    ok, detail = change_app_password(app_endpoint, username, current_password, new_password)
+    ok, detail = change_app_password(endpoint, username, current_password, new_password)
     if not ok:
-        return {"name": name, "status": "failed", "detail": f"app password change failed: {detail}"}
+        return {"name": name, "endpoint": endpoint, "status": "failed", "detail": f"app password change failed: {detail}"}
 
     try:
         new_secret_data = {**secret_data, "password": zvcrypto.aes_encrypt(new_password, key)}
@@ -353,6 +412,7 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
     except Exception as e:
         return {
             "name": name,
+            "endpoint": endpoint,
             "status": "failed",
             "detail": (
                 "APP PASSWORD WAS ALREADY CHANGED but the Vault update failed afterward -- "
@@ -360,7 +420,7 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
             ),
         }
 
-    return {"name": name, "status": "success", "detail": ""}
+    return {"name": name, "endpoint": endpoint, "status": "success", "detail": ""}
 
 
 def rotate_folder(dc, token, folder_id, master_key, org_key, app_endpoint, apply):
@@ -398,7 +458,63 @@ def build_summary(all_results):
     return "\n".join(lines), total, succeeded, failed
 
 
-def send_summary_email(to_addr, subject, body):
+_STATUS_STYLE = {
+    "success": ("#e6f4ea", "#1a7f37", "SUCCESS"),
+    "failed": ("#fdecea", "#c0392b", "FAILED"),
+}
+
+
+def build_html_summary(all_results, run_started_at, total, succeeded, failed):
+    row_html = []
+    for folder_id, results in all_results.items():
+        for r in results:
+            bg, fg, label = _STATUS_STYLE.get(r["status"], ("#eef1f5", "#555", r["status"].upper()))
+            row_html.append(f"""
+        <tr>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;color:#666;">{html.escape(str(folder_id))}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;">{html.escape(r.get("name") or "")}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;">{html.escape(r.get("endpoint") or "-")}</td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;">
+            <span style="display:inline-block;padding:2px 10px;border-radius:12px;background:{bg};color:{fg};font-size:12px;font-weight:600;">{label}</span>
+          </td>
+          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-size:13px;color:#444;">{html.escape(r.get("detail") or "")}</td>
+        </tr>""")
+
+    return f"""\
+<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:900px;margin:0 auto;color:#222;">
+  <h2 style="margin-bottom:4px;">Zoho Vault Password Rotation Report</h2>
+  <div style="color:#777;font-size:13px;margin-bottom:20px;">Run at {html.escape(run_started_at)}</div>
+
+  <table style="border-collapse:separate;border-spacing:12px 0;margin-bottom:24px;">
+    <tr>
+      <td style="background:#f5f6f8;border-radius:8px;padding:16px 24px;text-align:center;min-width:100px;">
+        <div style="font-size:28px;font-weight:700;color:#222;">{total}</div>
+        <div style="font-size:11px;letter-spacing:0.05em;color:#888;">TOTAL</div>
+      </td>
+      <td style="background:#e6f4ea;border-radius:8px;padding:16px 24px;text-align:center;min-width:100px;">
+        <div style="font-size:28px;font-weight:700;color:#1a7f37;">{succeeded}</div>
+        <div style="font-size:11px;letter-spacing:0.05em;color:#1a7f37;">SUCCEEDED</div>
+      </td>
+      <td style="background:#fdecea;border-radius:8px;padding:16px 24px;text-align:center;min-width:100px;">
+        <div style="font-size:28px;font-weight:700;color:#c0392b;">{failed}</div>
+        <div style="font-size:11px;letter-spacing:0.05em;color:#c0392b;">FAILED</div>
+      </td>
+    </tr>
+  </table>
+
+  <table style="width:100%;border-collapse:collapse;font-size:13px;">
+    <tr style="background:#222;color:#fff;text-align:left;">
+      <th style="padding:8px 12px;">Folder</th>
+      <th style="padding:8px 12px;">Secret</th>
+      <th style="padding:8px 12px;">Endpoint</th>
+      <th style="padding:8px 12px;">Status</th>
+      <th style="padding:8px 12px;">Detail</th>
+    </tr>{"".join(row_html)}
+  </table>
+</div>"""
+
+
+def send_summary_email(to_addr, subject, text_body, html_body):
     smtp_host = os.environ.get("SMTP_HOST", "smtp.office365.com")
     smtp_port = int(os.environ.get("SMTP_PORT", "587"))
     smtp_user = os.environ.get("SMTP_USER", "productsupport@corestack.io")
@@ -408,10 +524,12 @@ def send_summary_email(to_addr, subject, body):
         print("SMTP_PASSWORD not set -- skipping summary email", file=sys.stderr)
         return
 
-    msg = MIMEText(body)
+    msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
     msg["From"] = smtp_from
     msg["To"] = to_addr
+    msg.attach(MIMEText(text_body, "plain"))
+    msg.attach(MIMEText(html_body, "html"))
 
     with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
         server.starttls()
@@ -425,6 +543,7 @@ def main():
     if not dc:
         sys.exit(f"Unknown data center \"{args.dc}\". Known values: {', '.join(DC_HOSTS)}")
 
+    run_started_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
     token = get_access_token(dc)
 
     master_password = os.environ.get("ZOHO_VAULT_MASTER_PASSWORD")
@@ -445,10 +564,12 @@ def main():
     print(summary)
 
     if args.apply and not args.no_email:
+        html_body = build_html_summary(all_results, run_started_at, total, succeeded, failed)
         send_summary_email(
             args.email_to,
             subject=f"Zoho Vault password rotation report -- {succeeded}/{total} succeeded, {failed} failed",
-            body=summary,
+            text_body=summary,
+            html_body=html_body,
         )
         print(f"\nSummary email sent to {args.email_to}")
 
