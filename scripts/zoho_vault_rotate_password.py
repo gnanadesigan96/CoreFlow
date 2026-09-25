@@ -259,11 +259,14 @@ def update_secret(dc, token, secret_id, payload):
 
 def generate_password(length=PASSWORD_LENGTH):
     """15 chars by default, guaranteed at least one uppercase, one lowercase,
-    one digit, and one of !@#$&. Uses `secrets` (CSPRNG), not `random`.
+    one digit, and one of !@#$&, and STARTS WITH A LETTER (the app's own
+    password policy requires this: "must start with an alphabetic
+    character"). Uses `secrets` (CSPRNG), not `random`.
     """
-    alphabet = string.ascii_uppercase + string.ascii_lowercase + string.digits + PASSWORD_SYMBOLS
+    letters = string.ascii_uppercase + string.ascii_lowercase
+    alphabet = letters + string.digits + PASSWORD_SYMBOLS
     while True:
-        candidate = "".join(_secure_choice(alphabet) for _ in range(length))
+        candidate = _secure_choice(letters) + "".join(_secure_choice(alphabet) for _ in range(length - 1))
         if (
             any(c in string.ascii_uppercase for c in candidate)
             and any(c in string.ascii_lowercase for c in candidate)
