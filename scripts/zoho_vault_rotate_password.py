@@ -185,6 +185,35 @@ def list_secrets(dc, token, folder_id=None):
     return body["operation"].get("Details", [])
 
 
+def get_folder_names(dc, token):
+    """Maps chamberId -> folder display name, so reports can show a name
+    instead of a raw numeric ID.
+
+    NOT YET VERIFIED against a live account -- field casing (chambername/
+    chamberid) is inferred from the "Create Folders" payload shape in
+    Zoho's PDF, not a real GET /chambers response we've seen. Deliberately
+    non-fatal: if this endpoint or field names don't match, it just returns
+    an empty mapping and callers fall back to showing the raw folder ID.
+    """
+    try:
+        params = {"isAsc": "false", "pageNum": "0", "rowPerPage": "200"}
+        url = f"https://{dc['vault']}/api/rest/json/v1/chambers?{urllib.parse.urlencode(params)}"
+        status, body = http_request(url, headers={"Authorization": f"Zoho-oauthtoken {token}"})
+        result = body.get("operation", {}).get("result", {})
+        if status != 200 or str(result.get("status", "")).lower() != "success":
+            return {}
+        rows = body.get("operation", {}).get("Details", [])
+        mapping = {}
+        for row in rows:
+            chamber_id = row.get("chamberid") or row.get("CHAMBERID") or row.get("id")
+            chamber_name = row.get("chambername") or row.get("CHAMBERNAME") or row.get("name")
+            if chamber_id and chamber_name:
+                mapping[str(chamber_id)] = chamber_name
+        return mapping
+    except Exception:
+        return {}
+
+
 def get_login(dc, token):
     url = f"https://{dc['vault']}/api/json/login?OPERATION_NAME=GET_LOGIN"
     return http_request(url, headers={"Authorization": f"Bearer {token}"})
@@ -434,22 +463,31 @@ def rotate_folder(dc, token, folder_id, master_key, org_key, app_endpoint, apply
     return results
 
 
-def build_summary(all_results):
+def build_summary(all_results, folder_names):
     total = succeeded = failed = 0
+    folder_lines = []
     failure_lines = []
     for folder_id, results in all_results.items():
+        folder_name = folder_names.get(str(folder_id), folder_id)
+        folder_total = len(results)
+        folder_succeeded = sum(1 for r in results if r["status"] == "success")
+        folder_failed = sum(1 for r in results if r["status"] == "failed")
+        folder_lines.append(f"  {folder_name}: {folder_succeeded}/{folder_total} succeeded, {folder_failed} failed")
+
+        total += folder_total
+        succeeded += folder_succeeded
+        failed += folder_failed
         for r in results:
-            total += 1
-            if r["status"] == "success":
-                succeeded += 1
-            elif r["status"] == "failed":
-                failed += 1
-                failure_lines.append(f"  - [folder {folder_id}] {r['name']}: {r['detail']}")
+            if r["status"] == "failed":
+                failure_lines.append(f"  - [{folder_name}] {r['name']}: {r['detail']}")
 
     lines = [
         f"Total secrets processed: {total}",
         f"Succeeded: {succeeded}",
         f"Failed: {failed}",
+        "",
+        "By folder:",
+        *folder_lines,
     ]
     if failure_lines:
         lines.append("")
@@ -462,60 +500,98 @@ def build_summary(all_results):
 # reliably in Outlook/Office365 -- matching the house style used by the
 # team's other automated reports (CS_Daily_Incident_Report).
 _STATUS_PILL = {
-    "success": ("#F0FDF4", "#15803D", "Success"),
-    "failed": ("#FEE2E2", "#B91C1C", "Failed"),
-    "dry-run": ("#EFF6FF", "#1D4ED8", "Dry Run"),
+    "success": ("#F0FDF4", "#15803D", "&#9989; Success"),
+    "failed": ("#FEE2E2", "#B91C1C", "&#10060; Failed"),
+    "dry-run": ("#EFF6FF", "#1D4ED8", "&#128337; Dry Run"),
 }
 _SECTION_LABEL = 'style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#94A3B8;padding-bottom:10px;"'
-_TH = 'style="padding:5px 10px;font-size:9px;font-weight:700;color:#94A3B8;text-transform:uppercase;text-align:left;border-bottom:1px solid #E4E8EF;"'
-_TD = 'style="padding:5px 10px;font-size:11px;color:#334155;border-bottom:1px solid #F1F5F9;"'
+_TH = 'style="padding:6px 10px;font-size:9px;font-weight:700;color:#94A3B8;text-transform:uppercase;text-align:left;border-bottom:1px solid #E4E8EF;"'
+_TD_BASE = "padding:7px 10px;font-size:11px;color:#334155;border-bottom:1px solid #F1F5F9;"
+_TD = f'style="{_TD_BASE}"'
+
+
+def _td(extra_style=""):
+    """A <td ...> style attribute with extra CSS appended -- never emit two
+    separate style="" attributes on one element (HTML only honors the
+    first, so the second silently gets dropped by real mail clients).
+    """
+    return f'style="{_TD_BASE}{extra_style}"'
 
 
 def _stat_card(value, label, color):
     return f"""<td width="33%" style="padding-right:10px;" valign="top">
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff;border:1px solid #E4E8EF;border-radius:10px;border-top:3px solid {color};">
-        <tr><td style="padding:12px 14px;">
-          <div style="font-size:10px;font-weight:600;color:#64748B;text-transform:uppercase;">{label}</div>
-          <div style="font-size:26px;font-weight:700;color:{color};line-height:1.1;margin:4px 0 2px;">{value}</div>
+        <tr><td style="padding:14px 16px;">
+          <div style="font-size:10px;font-weight:600;color:#64748B;text-transform:uppercase;letter-spacing:0.04em;">{label}</div>
+          <div style="font-size:30px;font-weight:700;color:{color};line-height:1.1;margin:6px 0 2px;">{value}</div>
         </td></tr>
       </table>
     </td>"""
 
 
-def _folder_card(folder_id, results):
+def _folder_breakdown_table(all_results, folder_names):
+    rows = []
+    for folder_id, results in all_results.items():
+        folder_name = folder_names.get(str(folder_id), str(folder_id))
+        folder_total = len(results)
+        folder_succeeded = sum(1 for r in results if r["status"] == "success")
+        folder_failed = sum(1 for r in results if r["status"] == "failed")
+        row_bg = "#FFFBF0" if folder_failed else "#FFFFFF"
+        failed_color = "#B91C1C" if folder_failed else "#94A3B8"
+        rows.append(f"""<tr style="background:{row_bg};">
+          <td {_td("font-weight:600;")}>&#128193;&nbsp;{html.escape(folder_name)}</td>
+          <td {_TD} align="center">{folder_total}</td>
+          <td {_TD} align="center"><span style="font-weight:700;color:#15803D;">{folder_succeeded}</span></td>
+          <td {_TD} align="center"><span style="font-weight:700;color:{failed_color};">{folder_failed}</span></td>
+        </tr>""")
+
+    return f"""<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff;border:1px solid #E4E8EF;border-radius:10px;">
+      <tr style="background:#F8FAFC;">
+        <th {_TH} width="55%">Folder</th>
+        <th {_TH} width="15%" align="center">Total</th>
+        <th {_TH} width="15%" align="center">Succeeded</th>
+        <th {_TH} width="15%" align="center">Failed</th>
+      </tr>{"".join(rows)}
+    </table>"""
+
+
+def _folder_card(folder_name, results):
     folder_succeeded = sum(1 for r in results if r["status"] == "success")
     folder_failed = sum(1 for r in results if r["status"] == "failed")
     badges = []
     if folder_succeeded:
-        badges.append(f'<span style="font-size:10px;background:#F0FDF4;color:#15803D;padding:2px 6px;border-radius:4px;margin-left:4px;">{folder_succeeded} Succeeded</span>')
+        badges.append(f'<span style="font-size:10px;font-weight:600;background:#F0FDF4;color:#15803D;padding:2px 8px;border-radius:10px;margin-left:4px;">{folder_succeeded} Succeeded</span>')
     if folder_failed:
-        badges.append(f'<span style="font-size:10px;background:#FEE2E2;color:#B91C1C;padding:2px 6px;border-radius:4px;margin-left:4px;">{folder_failed} Failed</span>')
+        badges.append(f'<span style="font-size:10px;font-weight:600;background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;margin-left:4px;">{folder_failed} Failed</span>')
 
     body_rows = []
-    for r in results:
+    for i, r in enumerate(results):
         bg, fg, label = _STATUS_PILL.get(r["status"], ("#F1F5F9", "#475569", r["status"].title()))
-        row_bg = "#FFFBF0" if r["status"] == "failed" else "#FFFFFF"
+        if r["status"] == "failed":
+            row_bg = "#FFFBF0"
+        else:
+            row_bg = "#FFFFFF" if i % 2 == 0 else "#FAFBFC"
         body_rows.append(f"""<tr style="background:{row_bg};">
-          <td {_TD} style="font-weight:600;">{html.escape(r.get("name") or "")}</td>
-          <td {_TD} style="font-family:monospace;font-size:10px;">{html.escape(r.get("endpoint") or "-")}</td>
+          <td {_td("font-weight:600;")}>{html.escape(r.get("name") or "")}</td>
+          <td {_td("font-family:monospace;font-size:10px;")}>{html.escape(r.get("endpoint") or "-")}</td>
           <td {_TD}><span style="font-size:10px;font-weight:600;background:{bg};color:{fg};padding:2px 8px;border-radius:10px;white-space:nowrap;">{label}</span></td>
-          <td {_TD} style="color:#64748B;">{html.escape(r.get("detail") or "")}</td>
+          <td {_td("color:#64748B;")}>{html.escape(r.get("detail") or "")}</td>
         </tr>""")
 
     return f"""<tr><td style="padding-bottom:14px;">
       <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff;border:1px solid #E4E8EF;border-radius:10px;">
-        <tr><td style="background:#F8FAFC;border-bottom:1px solid #E4E8EF;padding:8px 14px;">
+        <tr><td style="background:#F8FAFC;border-bottom:1px solid #E4E8EF;padding:9px 14px;">
           <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
-            <td style="font-size:13px;font-weight:700;color:#0F172A;font-family:monospace;">{html.escape(str(folder_id))}</td>
+            <td style="font-size:13px;font-weight:700;color:#0F172A;">&#128193;&nbsp;{html.escape(folder_name)}</td>
             <td align="right">{"".join(badges)}</td>
           </tr></table>
         </td></tr>
         <tr><td>
           <table width="100%" cellpadding="0" cellspacing="0" border="0">
             <tr style="background:#F8FAFC;">
-              <th {_TH} width="30%">Secret</th>
+              <th {_TH} width="28%">Secret</th>
               <th {_TH} width="20%">Endpoint</th>
-              <th {_TH} width="12%">Status</th>
+              <th {_TH} width="14%">Status</th>
               <th {_TH} width="38%">Detail</th>
             </tr>{"".join(body_rows)}
           </table>
@@ -524,8 +600,12 @@ def _folder_card(folder_id, results):
     </td></tr>"""
 
 
-def build_html_summary(all_results, run_started_at, total, succeeded, failed):
-    folder_cards = "".join(_folder_card(folder_id, results) for folder_id, results in all_results.items())
+def build_html_summary(all_results, folder_names, run_started_at, total, succeeded, failed):
+    folder_cards = "".join(
+        _folder_card(folder_names.get(str(folder_id), str(folder_id)), results)
+        for folder_id, results in all_results.items()
+    )
+    breakdown_table = _folder_breakdown_table(all_results, folder_names)
 
     return f"""\
 <!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Zoho Vault Password Rotation Report</title></head>
@@ -534,19 +614,22 @@ def build_html_summary(all_results, run_started_at, total, succeeded, failed):
 <table width="900" cellpadding="0" cellspacing="0" border="0" style="max-width:900px;width:100%;">
 
 <tr><td style="background:#fff;border:1px solid #E4E8EF;border-radius:10px;padding:18px 28px 16px;">
-  <div style="font-size:17px;font-weight:700;color:#0F172A;">Zoho Vault Password Rotation Report</div>
+  <div style="font-size:17px;font-weight:700;color:#0F172A;">&#128274;&nbsp;Zoho Vault Password Rotation Report</div>
   <div style="font-size:11px;color:#64748B;margin-top:3px;"><b style="color:#334155;">Run at:</b>&nbsp;{html.escape(run_started_at)}</div>
 </td></tr>
 <tr><td height="14"></td></tr>
 
 <tr><td {_SECTION_LABEL}>Summary</td></tr>
-<tr><td style="padding-bottom:14px;">
+<tr><td style="padding-bottom:20px;">
   <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
     {_stat_card(total, "Total", "#3B82F6")}
     {_stat_card(succeeded, "Succeeded", "#10B981")}
     {_stat_card(failed, "Failed", "#EF4444")}
   </tr></table>
 </td></tr>
+
+<tr><td {_SECTION_LABEL}>Folder Breakdown</td></tr>
+<tr><td style="padding-bottom:20px;">{breakdown_table}</td></tr>
 
 <tr><td {_SECTION_LABEL}>Results by Folder</td></tr>
 {folder_cards}
@@ -592,21 +675,22 @@ def main():
     if not master_password:
         sys.exit("Set ZOHO_VAULT_MASTER_PASSWORD (your Vault account's actual Master Password)")
     master_key, org_key = derive_keys(dc, token, master_password)
+    folder_names = get_folder_names(dc, token)
 
     if not args.apply:
         print("DRY RUN -- no app passwords or Vault secrets will be changed. Pass --apply to run for real.\n")
 
     all_results = {}
     for folder_id in args.folder_id:
-        print(f"Folder {folder_id}:")
+        print(f"Folder {folder_names.get(str(folder_id), folder_id)}:")
         all_results[folder_id] = rotate_folder(dc, token, folder_id, master_key, org_key, args.app_endpoint, args.apply)
         print()
 
-    summary, total, succeeded, failed = build_summary(all_results)
+    summary, total, succeeded, failed = build_summary(all_results, folder_names)
     print(summary)
 
     if args.apply and not args.no_email:
-        html_body = build_html_summary(all_results, run_started_at, total, succeeded, failed)
+        html_body = build_html_summary(all_results, folder_names, run_started_at, total, succeeded, failed)
         send_summary_email(
             args.email_to,
             subject=f"Zoho Vault password rotation report -- {succeeded}/{total} succeeded, {failed} failed",
