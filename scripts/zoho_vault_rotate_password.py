@@ -488,7 +488,12 @@ def rotate_folder(dc, token, folder_id, master_key, org_key, app_endpoint, apply
         result = rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply)
         results.append(result)
         suffix = f" -- {result['detail']}" if result["detail"] else ""
-        print(f"  [{result['status']}] {result['name']}{suffix}")
+        # endpoint already carries "(via <matched vault URL>)" or
+        # "(fallback -- no URL match)" -- printed here too so a dry run
+        # shows, per secret, exactly which stored Vault URL picked which
+        # API endpoint, before anything real gets called.
+        endpoint_str = f" [{result['endpoint']}]" if result.get("endpoint") else ""
+        print(f"  [{result['status']}]{endpoint_str} {result['name']}{suffix}")
     return results
 
 
