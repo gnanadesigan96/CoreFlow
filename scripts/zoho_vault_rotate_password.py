@@ -147,6 +147,12 @@ def http_request(url, method="GET", data=None, headers=None):
             return resp.status, json.loads(resp.read())
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read())
+    except urllib.error.URLError as e:
+        sys.exit(
+            f"Could not reach {url} ({e.reason}). This is a network/DNS problem, not a "
+            f"Zoho API error -- check your internet connection, VPN, and that --dc/"
+            f"ZOHO_VAULT_DC is the correct data center for this account."
+        )
 
 
 def get_access_token(dc):
