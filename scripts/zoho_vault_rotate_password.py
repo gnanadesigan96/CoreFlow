@@ -458,60 +458,102 @@ def build_summary(all_results):
     return "\n".join(lines), total, succeeded, failed
 
 
-_STATUS_STYLE = {
-    "success": ("#e6f4ea", "#1a7f37", "SUCCESS"),
-    "failed": ("#fdecea", "#c0392b", "FAILED"),
+# Table-based layout (nested <table>s, no divs/flexbox) so it renders
+# reliably in Outlook/Office365 -- matching the house style used by the
+# team's other automated reports (CS_Daily_Incident_Report).
+_STATUS_PILL = {
+    "success": ("#F0FDF4", "#15803D", "Success"),
+    "failed": ("#FEE2E2", "#B91C1C", "Failed"),
+    "dry-run": ("#EFF6FF", "#1D4ED8", "Dry Run"),
 }
+_SECTION_LABEL = 'style="font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:#94A3B8;padding-bottom:10px;"'
+_TH = 'style="padding:5px 10px;font-size:9px;font-weight:700;color:#94A3B8;text-transform:uppercase;text-align:left;border-bottom:1px solid #E4E8EF;"'
+_TD = 'style="padding:5px 10px;font-size:11px;color:#334155;border-bottom:1px solid #F1F5F9;"'
+
+
+def _stat_card(value, label, color):
+    return f"""<td width="33%" style="padding-right:10px;" valign="top">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff;border:1px solid #E4E8EF;border-radius:10px;border-top:3px solid {color};">
+        <tr><td style="padding:12px 14px;">
+          <div style="font-size:10px;font-weight:600;color:#64748B;text-transform:uppercase;">{label}</div>
+          <div style="font-size:26px;font-weight:700;color:{color};line-height:1.1;margin:4px 0 2px;">{value}</div>
+        </td></tr>
+      </table>
+    </td>"""
+
+
+def _folder_card(folder_id, results):
+    folder_succeeded = sum(1 for r in results if r["status"] == "success")
+    folder_failed = sum(1 for r in results if r["status"] == "failed")
+    badges = []
+    if folder_succeeded:
+        badges.append(f'<span style="font-size:10px;background:#F0FDF4;color:#15803D;padding:2px 6px;border-radius:4px;margin-left:4px;">{folder_succeeded} Succeeded</span>')
+    if folder_failed:
+        badges.append(f'<span style="font-size:10px;background:#FEE2E2;color:#B91C1C;padding:2px 6px;border-radius:4px;margin-left:4px;">{folder_failed} Failed</span>')
+
+    body_rows = []
+    for r in results:
+        bg, fg, label = _STATUS_PILL.get(r["status"], ("#F1F5F9", "#475569", r["status"].title()))
+        row_bg = "#FFFBF0" if r["status"] == "failed" else "#FFFFFF"
+        body_rows.append(f"""<tr style="background:{row_bg};">
+          <td {_TD} style="font-weight:600;">{html.escape(r.get("name") or "")}</td>
+          <td {_TD} style="font-family:monospace;font-size:10px;">{html.escape(r.get("endpoint") or "-")}</td>
+          <td {_TD}><span style="font-size:10px;font-weight:600;background:{bg};color:{fg};padding:2px 8px;border-radius:10px;white-space:nowrap;">{label}</span></td>
+          <td {_TD} style="color:#64748B;">{html.escape(r.get("detail") or "")}</td>
+        </tr>""")
+
+    return f"""<tr><td style="padding-bottom:14px;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff;border:1px solid #E4E8EF;border-radius:10px;">
+        <tr><td style="background:#F8FAFC;border-bottom:1px solid #E4E8EF;padding:8px 14px;">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+            <td style="font-size:13px;font-weight:700;color:#0F172A;font-family:monospace;">{html.escape(str(folder_id))}</td>
+            <td align="right">{"".join(badges)}</td>
+          </tr></table>
+        </td></tr>
+        <tr><td>
+          <table width="100%" cellpadding="0" cellspacing="0" border="0">
+            <tr style="background:#F8FAFC;">
+              <th {_TH} width="30%">Secret</th>
+              <th {_TH} width="20%">Endpoint</th>
+              <th {_TH} width="12%">Status</th>
+              <th {_TH} width="38%">Detail</th>
+            </tr>{"".join(body_rows)}
+          </table>
+        </td></tr>
+      </table>
+    </td></tr>"""
 
 
 def build_html_summary(all_results, run_started_at, total, succeeded, failed):
-    row_html = []
-    for folder_id, results in all_results.items():
-        for r in results:
-            bg, fg, label = _STATUS_STYLE.get(r["status"], ("#eef1f5", "#555", r["status"].upper()))
-            row_html.append(f"""
-        <tr>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;color:#666;">{html.escape(str(folder_id))}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee;">{html.escape(r.get("name") or "")}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-family:monospace;font-size:12px;">{html.escape(r.get("endpoint") or "-")}</td>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee;">
-            <span style="display:inline-block;padding:2px 10px;border-radius:12px;background:{bg};color:{fg};font-size:12px;font-weight:600;">{label}</span>
-          </td>
-          <td style="padding:8px 12px;border-bottom:1px solid #eee;font-size:13px;color:#444;">{html.escape(r.get("detail") or "")}</td>
-        </tr>""")
+    folder_cards = "".join(_folder_card(folder_id, results) for folder_id, results in all_results.items())
 
     return f"""\
-<div style="font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:900px;margin:0 auto;color:#222;">
-  <h2 style="margin-bottom:4px;">Zoho Vault Password Rotation Report</h2>
-  <div style="color:#777;font-size:13px;margin-bottom:20px;">Run at {html.escape(run_started_at)}</div>
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8"><title>Zoho Vault Password Rotation Report</title></head>
+<body style="margin:0;padding:0;background:#F4F6F9;font-family:Arial,sans-serif;font-size:13px;color:#1A2035;">
+<table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#F4F6F9;"><tr><td align="center" style="padding:20px 16px 40px;">
+<table width="900" cellpadding="0" cellspacing="0" border="0" style="max-width:900px;width:100%;">
 
-  <table style="border-collapse:separate;border-spacing:12px 0;margin-bottom:24px;">
-    <tr>
-      <td style="background:#f5f6f8;border-radius:8px;padding:16px 24px;text-align:center;min-width:100px;">
-        <div style="font-size:28px;font-weight:700;color:#222;">{total}</div>
-        <div style="font-size:11px;letter-spacing:0.05em;color:#888;">TOTAL</div>
-      </td>
-      <td style="background:#e6f4ea;border-radius:8px;padding:16px 24px;text-align:center;min-width:100px;">
-        <div style="font-size:28px;font-weight:700;color:#1a7f37;">{succeeded}</div>
-        <div style="font-size:11px;letter-spacing:0.05em;color:#1a7f37;">SUCCEEDED</div>
-      </td>
-      <td style="background:#fdecea;border-radius:8px;padding:16px 24px;text-align:center;min-width:100px;">
-        <div style="font-size:28px;font-weight:700;color:#c0392b;">{failed}</div>
-        <div style="font-size:11px;letter-spacing:0.05em;color:#c0392b;">FAILED</div>
-      </td>
-    </tr>
-  </table>
+<tr><td style="background:#fff;border:1px solid #E4E8EF;border-radius:10px;padding:18px 28px 16px;">
+  <div style="font-size:17px;font-weight:700;color:#0F172A;">Zoho Vault Password Rotation Report</div>
+  <div style="font-size:11px;color:#64748B;margin-top:3px;"><b style="color:#334155;">Run at:</b>&nbsp;{html.escape(run_started_at)}</div>
+</td></tr>
+<tr><td height="14"></td></tr>
 
-  <table style="width:100%;border-collapse:collapse;font-size:13px;">
-    <tr style="background:#222;color:#fff;text-align:left;">
-      <th style="padding:8px 12px;">Folder</th>
-      <th style="padding:8px 12px;">Secret</th>
-      <th style="padding:8px 12px;">Endpoint</th>
-      <th style="padding:8px 12px;">Status</th>
-      <th style="padding:8px 12px;">Detail</th>
-    </tr>{"".join(row_html)}
-  </table>
-</div>"""
+<tr><td {_SECTION_LABEL}>Summary</td></tr>
+<tr><td style="padding-bottom:14px;">
+  <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+    {_stat_card(total, "Total", "#3B82F6")}
+    {_stat_card(succeeded, "Succeeded", "#10B981")}
+    {_stat_card(failed, "Failed", "#EF4444")}
+  </tr></table>
+</td></tr>
+
+<tr><td {_SECTION_LABEL}>Results by Folder</td></tr>
+{folder_cards}
+
+</table>
+</td></tr></table>
+</body></html>"""
 
 
 def send_summary_email(to_addr, subject, text_body, html_body):
