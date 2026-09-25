@@ -138,6 +138,14 @@ def parse_args():
     return p.parse_args()
 
 
+class NetworkError(Exception):
+    """A URLError (DNS failure, no route, connection refused/reset) -- not a
+    Zoho API error response. Callers where reaching the server is essential
+    let this propagate to main()'s top-level handler; get_folder_names()
+    catches it locally since a name lookup failing there is non-fatal.
+    """
+
+
 def http_request(url, method="GET", data=None, headers=None):
     headers = headers or {}
     body = urllib.parse.urlencode(data).encode() if data is not None else None
@@ -148,11 +156,11 @@ def http_request(url, method="GET", data=None, headers=None):
     except urllib.error.HTTPError as e:
         return e.code, json.loads(e.read())
     except urllib.error.URLError as e:
-        sys.exit(
+        raise NetworkError(
             f"Could not reach {url} ({e.reason}). This is a network/DNS problem, not a "
             f"Zoho API error -- check your internet connection, VPN, and that --dc/"
             f"ZOHO_VAULT_DC is the correct data center for this account."
-        )
+        ) from e
 
 
 def get_access_token(dc):
@@ -353,10 +361,14 @@ def resolve_app_endpoint(row, fallback=None):
     """Match the secret's stored URL (secreturl, or any entry in
     secretmultipleurl -- both plaintext fields, no crypto involved) against
     REGION_ENDPOINTS to find which API host to call for this account.
-    Returns `fallback` (the --app-endpoint override) if no candidate URL on
-    the secret matches a known region, or None if there's no fallback
-    either -- callers should treat None as "can't safely proceed" rather
-    than silently guessing a region.
+
+    Returns (endpoint, source) where `source` is the secret's own URL that
+    matched (proof this came from the secret's data, not a guess), or None
+    if `endpoint` came from `fallback` (the --app-endpoint override) instead
+    because no stored URL on the secret matched a known region. `endpoint`
+    itself is None (with source None) if there's no fallback either --
+    callers should treat that as "can't safely proceed" rather than
+    silently guessing a region.
     """
     candidates = []
     if row.get("secreturl"):
@@ -369,9 +381,9 @@ def resolve_app_endpoint(row, fallback=None):
         host = _normalize_host(candidate)
         for known_url, endpoint in REGION_ENDPOINTS.items():
             if host == known_url or host.endswith("." + known_url):
-                return endpoint
+                return endpoint, candidate
 
-    return fallback
+    return fallback, None
 
 
 def change_app_password(app_endpoint, username, current_password, new_password):
@@ -422,7 +434,7 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
     except Exception as e:
         return {"name": name, "endpoint": None, "status": "failed", "detail": f"decrypt error: {e}"}
 
-    endpoint = resolve_app_endpoint(row, fallback=app_endpoint)
+    endpoint, matched_url = resolve_app_endpoint(row, fallback=app_endpoint)
     if not endpoint:
         return {
             "name": name,
@@ -430,11 +442,17 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
             "status": "failed",
             "detail": "no API endpoint match for this secret's stored URL, and no --app-endpoint fallback given",
         }
+    # Shown in every report line so a region mismatch is visible at a glance:
+    # "endpoint (via URL)" proves it came from the secret's own data, while
+    # "endpoint (fallback -- no URL match)" is a red flag for a multi-region
+    # folder, since it means every unmatched secret would silently share one
+    # endpoint rather than each using its own region's.
+    endpoint_display = f"{endpoint} (via {matched_url})" if matched_url else f"{endpoint} (fallback -- no URL match)"
 
     if not apply:
         return {
             "name": name,
-            "endpoint": endpoint,
+            "endpoint": endpoint_display,
             "status": "dry-run",
             "detail": f"would authenticate as {username!r} against {endpoint}, change the app password, then update Vault",
         }
@@ -443,7 +461,7 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
 
     ok, detail = change_app_password(endpoint, username, current_password, new_password)
     if not ok:
-        return {"name": name, "endpoint": endpoint, "status": "failed", "detail": f"app password change failed: {detail}"}
+        return {"name": name, "endpoint": endpoint_display, "status": "failed", "detail": f"app password change failed: {detail}"}
 
     try:
         new_secret_data = {**secret_data, "password": zvcrypto.aes_encrypt(new_password, key)}
@@ -452,7 +470,7 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
     except Exception as e:
         return {
             "name": name,
-            "endpoint": endpoint,
+            "endpoint": endpoint_display,
             "status": "failed",
             "detail": (
                 "APP PASSWORD WAS ALREADY CHANGED but the Vault update failed afterward -- "
@@ -460,7 +478,7 @@ def rotate_secret(dc, token, row, master_key, org_key, app_endpoint, apply):
             ),
         }
 
-    return {"name": name, "endpoint": endpoint, "status": "success", "detail": ""}
+    return {"name": name, "endpoint": endpoint_display, "status": "success", "detail": ""}
 
 
 def rotate_folder(dc, token, folder_id, master_key, org_key, app_endpoint, apply):
@@ -712,4 +730,7 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except NetworkError as e:
+        sys.exit(str(e))
