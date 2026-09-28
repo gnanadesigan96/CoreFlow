@@ -8,8 +8,11 @@ For each secret in each given folder, in order:
   3. Authenticate to the application with the current username + password,
      then call its change-password endpoint with the new password.
   4. ONLY if that succeeds: update the Vault secret -- new (encrypted)
-     password, and description set to "old password: <the password from
-     step 1>".
+     password, and description set to "Password rotated: <Month Year>".
+     (Not the literal old password: Zoho Vault's description field
+     rejects punctuation with PATTERN_NOT_MATCHED, which any password
+     containing a symbol -- including ones this script itself generates --
+     would trigger.)
   5. Track success/failure per secret (a Vault-write failure AFTER the app
      password already changed is flagged loudly -- that's a real mismatch
      needing manual attention, not just a skipped secret).
@@ -497,7 +500,12 @@ def rotate_secret(dc, token, row, master_key, org_key, apply):
 
     try:
         new_secret_data = {**secret_data, "password": zvcrypto.aes_encrypt(new_password, key)}
-        description = f"old password: {current_password}"
+        # Confirmed against a live account: Zoho Vault's description field
+        # rejects punctuation (PATTERN_NOT_MATCHED) -- putting the raw old
+        # password here broke on any password containing a symbol (which
+        # includes ones this script itself generates, from PASSWORD_SYMBOLS).
+        # Letters/digits/space/colon only -- the one shape confirmed safe.
+        description = f"Password rotated: {datetime.now(timezone.utc).strftime('%B %Y')}"
         update_secret(dc, token, row["secretid"], build_full_update_payload(row, secretdata=new_secret_data, description=description))
     except Exception as e:
         return {
