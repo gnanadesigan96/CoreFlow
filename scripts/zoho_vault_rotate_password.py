@@ -52,7 +52,7 @@ Confirmed today against a live account (DC: in):
     + base64 PKCS8) -- see zvcrypto.py.
 
 Setup:
-  pip install cryptography requests
+  pip install cryptography requests openpyxl
 
   export ZOHO_VAULT_CLIENT_ID=...
   export ZOHO_VAULT_CLIENT_SECRET=...
@@ -92,8 +92,13 @@ import sys
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from io import BytesIO
+
+import openpyxl
+from openpyxl.styles import Font, PatternFill
 from secrets import choice as _secure_choice
 
 import requests
@@ -611,22 +616,37 @@ def _folder_breakdown_table(all_results, folder_names):
 
 
 def _folder_card(folder_name, results):
+    """Only lists FAILED secrets -- with folders running to hundreds of
+    secrets, listing every success inline made the email unreadable. Full
+    detail for every secret (success and failure) goes in the attached
+    Excel workbook instead; the email body is just what needs attention.
+    """
     folder_succeeded = sum(1 for r in results if r["status"] == "success")
-    folder_failed = sum(1 for r in results if r["status"] == "failed")
-    badges = []
-    if folder_succeeded:
-        badges.append(f'<span style="font-size:10px;font-weight:600;background:#F0FDF4;color:#15803D;padding:2px 8px;border-radius:10px;margin-left:4px;">{folder_succeeded} Succeeded</span>')
-    if folder_failed:
-        badges.append(f'<span style="font-size:10px;font-weight:600;background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;margin-left:4px;">{folder_failed} Failed</span>')
+    failed_results = [r for r in results if r["status"] == "failed"]
+    folder_failed = len(failed_results)
+
+    if not failed_results:
+        return f"""<tr><td style="padding-bottom:14px;">
+      <table width="100%" cellpadding="0" cellspacing="0" border="0" style="background:#fff;border:1px solid #E4E8EF;border-radius:10px;">
+        <tr><td style="background:#F8FAFC;border-bottom:1px solid #E4E8EF;padding:9px 14px;">
+          <table width="100%" cellpadding="0" cellspacing="0" border="0"><tr>
+            <td style="font-size:13px;font-weight:700;color:#0F172A;">&#128193;&nbsp;{html.escape(folder_name)}</td>
+            <td align="right"><span style="font-size:10px;font-weight:600;background:#F0FDF4;color:#15803D;padding:2px 8px;border-radius:10px;">{folder_succeeded} Succeeded</span></td>
+          </tr></table>
+        </td></tr>
+        <tr><td style="padding:16px 14px;font-size:12px;color:#15803D;">&#9989;&nbsp;All {folder_succeeded} secrets succeeded -- no failures to show.</td></tr>
+      </table>
+    </td></tr>"""
+
+    badges = [
+        f'<span style="font-size:10px;font-weight:600;background:#F0FDF4;color:#15803D;padding:2px 8px;border-radius:10px;margin-left:4px;">{folder_succeeded} Succeeded</span>',
+        f'<span style="font-size:10px;font-weight:600;background:#FEE2E2;color:#B91C1C;padding:2px 8px;border-radius:10px;margin-left:4px;">{folder_failed} Failed</span>',
+    ]
 
     body_rows = []
-    for i, r in enumerate(results):
+    for r in failed_results:
         bg, fg, label = _STATUS_PILL.get(r["status"], ("#F1F5F9", "#475569", r["status"].title()))
-        if r["status"] == "failed":
-            row_bg = "#FFFBF0"
-        else:
-            row_bg = "#FFFFFF" if i % 2 == 0 else "#FAFBFC"
-        body_rows.append(f"""<tr style="background:{row_bg};">
+        body_rows.append(f"""<tr style="background:#FFFBF0;">
           <td {_td("font-weight:600;")}>{html.escape(r.get("name") or "")}</td>
           <td {_td("font-family:monospace;font-size:10px;")}>{html.escape(r.get("endpoint") or "-")}</td>
           <td {_TD}><span style="font-size:10px;font-weight:600;background:{bg};color:{fg};padding:2px 8px;border-radius:10px;white-space:nowrap;">{label}</span></td>
@@ -653,6 +673,54 @@ def _folder_card(folder_name, results):
         </td></tr>
       </table>
     </td></tr>"""
+
+
+def build_results_workbook(all_results, folder_names):
+    """Full success+failure detail for every secret processed, across every
+    folder -- the email body only lists failures (a 200-secret folder is
+    too much for an email), so this .xlsx is the one place every result
+    lives. Returns the workbook's raw bytes, ready to attach to an email.
+    """
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Rotation Results"
+
+    headers = ["Folder", "Secret", "Endpoint", "Status", "Detail"]
+    ws.append(headers)
+    header_font = Font(bold=True, color="FFFFFF")
+    header_fill = PatternFill("solid", fgColor="334155")
+    for col in range(1, len(headers) + 1):
+        cell = ws.cell(row=1, column=col)
+        cell.font = header_font
+        cell.fill = header_fill
+
+    status_fill = {
+        "success": PatternFill("solid", fgColor="F0FDF4"),
+        "failed": PatternFill("solid", fgColor="FEE2E2"),
+        "dry-run": PatternFill("solid", fgColor="EFF6FF"),
+    }
+
+    row_idx = 2
+    for folder_id, results in all_results.items():
+        folder_name = folder_names.get(str(folder_id), str(folder_id))
+        for r in results:
+            ws.cell(row=row_idx, column=1, value=folder_name)
+            ws.cell(row=row_idx, column=2, value=r.get("name") or "")
+            ws.cell(row=row_idx, column=3, value=r.get("endpoint") or "")
+            status_cell = ws.cell(row=row_idx, column=4, value=r["status"])
+            fill = status_fill.get(r["status"])
+            if fill:
+                status_cell.fill = fill
+            ws.cell(row=row_idx, column=5, value=r.get("detail") or "")
+            row_idx += 1
+
+    for col, width in enumerate([28, 34, 34, 12, 60], start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
+    ws.freeze_panes = "A2"
+
+    buffer = BytesIO()
+    wb.save(buffer)
+    return buffer.getvalue()
 
 
 def build_html_summary(all_results, folder_names, run_started_at, total, succeeded, failed):
@@ -686,7 +754,8 @@ def build_html_summary(all_results, folder_names, run_started_at, total, succeed
 <tr><td {_SECTION_LABEL}>Folder Breakdown</td></tr>
 <tr><td style="padding-bottom:20px;">{breakdown_table}</td></tr>
 
-<tr><td {_SECTION_LABEL}>Results by Folder</td></tr>
+<tr><td {_SECTION_LABEL}>Failures by Folder</td></tr>
+<tr><td style="padding-bottom:8px;font-size:11px;color:#64748B;">Only secrets that FAILED are listed below. Full detail for every secret -- successes included -- is in the attached Excel file.</td></tr>
 {folder_cards}
 
 </table>
@@ -694,7 +763,7 @@ def build_html_summary(all_results, folder_names, run_started_at, total, succeed
 </body></html>"""
 
 
-def send_summary_email(to_addr, subject, text_body, html_body):
+def send_summary_email(to_addr, subject, text_body, html_body, attachment_bytes=None, attachment_filename=None):
     smtp_host = SMTP_HOST
     smtp_port = SMTP_PORT
     smtp_user = SMTP_USER
@@ -704,12 +773,20 @@ def send_summary_email(to_addr, subject, text_body, html_body):
         print("SMTP_PASSWORD not set -- skipping summary email", file=sys.stderr)
         return
 
-    msg = MIMEMultipart("alternative")
+    msg = MIMEMultipart("mixed")
     msg["Subject"] = subject
     msg["From"] = smtp_from
     msg["To"] = to_addr
-    msg.attach(MIMEText(text_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
+
+    body = MIMEMultipart("alternative")
+    body.attach(MIMEText(text_body, "plain"))
+    body.attach(MIMEText(html_body, "html"))
+    msg.attach(body)
+
+    if attachment_bytes is not None:
+        part = MIMEApplication(attachment_bytes, _subtype="xlsx")
+        part.add_header("Content-Disposition", "attachment", filename=attachment_filename or "rotation_results.xlsx")
+        msg.attach(part)
 
     with smtplib.SMTP(smtp_host, smtp_port, timeout=30) as server:
         server.starttls()
@@ -746,13 +823,17 @@ def main():
 
     if args.apply and not args.no_email:
         html_body = build_html_summary(all_results, folder_names, run_started_at, total, succeeded, failed)
+        workbook_bytes = build_results_workbook(all_results, folder_names)
+        run_date = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         send_summary_email(
             args.email_to,
             subject=f"Zoho Vault password rotation report -- {succeeded}/{total} succeeded, {failed} failed",
             text_body=summary,
             html_body=html_body,
+            attachment_bytes=workbook_bytes,
+            attachment_filename=f"zoho_vault_rotation_{run_date}.xlsx",
         )
-        print(f"\nSummary email sent to {args.email_to}")
+        print(f"\nSummary email sent to {args.email_to} (full detail attached as Excel)")
 
 
 if __name__ == "__main__":
