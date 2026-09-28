@@ -117,6 +117,11 @@ REGION_ENDPOINTS = {
     "in.corestack.io": "api-in.corestack.io",
     "useast.corestack.io": "api-useast.corestack.io",
     "us3.corestack.io": "api-us3.corestack.io",
+    # White-labeled customer domains that don't share a corestack.io/
+    # hootstack.com suffix, so they can't resolve via the subdomain-suffix
+    # match above -- each needs its own explicit one-off entry, confirmed
+    # per-domain by the user rather than guessed.
+    "mirai.chavans.ai": "api-in.corestack.io",  # India SaaS -- confirmed by user
 }
 
 DC_HOSTS = {
