@@ -362,12 +362,34 @@ def generate_password(length=PASSWORD_LENGTH):
 
 
 def decrypt_credentials(row, master_key, org_key):
-    """Returns (username, password, key_used, secret_data_dict)."""
+    """Returns (username, password, key_used, secret_data_dict, username_field,
+    password_field).
+
+    Most secrets use the standard "username"/"password" keys inside
+    secretData. Some -- confirmed against a live account, accounttype
+    '2052000000020591' -- use a custom Zoho secret template with generic
+    field names instead: "column_0" (username) and "column_1" (password).
+    Confirmed by the decrypted column_0 length exactly matching the
+    account's own name, and a COLUMNNAME: "column_1" entry in that secret's
+    own change history. username_field/password_field are returned so
+    callers write a new password back into the SAME field the secret
+    actually uses -- writing to a hardcoded "password" key on one of these
+    would silently add a new, unused field instead of updating the real
+    credential.
+    """
     secret_data = json.loads(row["secretData"])
     key = org_key if row.get("isshared") == "YES" else master_key
-    username = zvcrypto.aes_decrypt(secret_data.get("username", ""), key)
-    password = zvcrypto.aes_decrypt(secret_data.get("password", ""), key)
-    return username, password, key, secret_data
+
+    if "username" in secret_data or "password" in secret_data:
+        username_field, password_field = "username", "password"
+    elif "column_0" in secret_data and "column_1" in secret_data:
+        username_field, password_field = "column_0", "column_1"
+    else:
+        raise ValueError(f"Unrecognized secretData schema (no username/password or column_0/column_1 keys): {sorted(secret_data.keys())}")
+
+    username = zvcrypto.aes_decrypt(secret_data.get(username_field, ""), key)
+    password = zvcrypto.aes_decrypt(secret_data.get(password_field, ""), key)
+    return username, password, key, secret_data, username_field, password_field
 
 
 def _normalize_host(value):
@@ -473,7 +495,7 @@ def rotate_secret(dc, token, row, master_key, org_key, apply):
     name = row.get("secretname") or row["secretid"]
 
     try:
-        username, current_password, key, secret_data = decrypt_credentials(row, master_key, org_key)
+        username, current_password, key, secret_data, username_field, password_field = decrypt_credentials(row, master_key, org_key)
     except Exception as e:
         return {"name": name, "endpoint": None, "status": "failed", "detail": f"decrypt error: {e}"}
 
@@ -499,7 +521,7 @@ def rotate_secret(dc, token, row, master_key, org_key, apply):
         return {"name": name, "endpoint": endpoint_display, "status": "failed", "detail": f"app password change failed: {detail}"}
 
     try:
-        new_secret_data = {**secret_data, "password": zvcrypto.aes_encrypt(new_password, key)}
+        new_secret_data = {**secret_data, password_field: zvcrypto.aes_encrypt(new_password, key)}
         # Confirmed against a live account: Zoho Vault's description field
         # rejects punctuation (PATTERN_NOT_MATCHED) -- putting the raw old
         # password here broke on any password containing a symbol (which

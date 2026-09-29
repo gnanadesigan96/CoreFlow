@@ -86,7 +86,7 @@ def main():
     row = find_row(rows, args)
     name = row.get("secretname") or row["secretid"]
 
-    current_username, current_password, key, secret_data = m.decrypt_credentials(row, master_key, org_key)
+    current_username, current_password, key, secret_data, username_field, password_field = m.decrypt_credentials(row, master_key, org_key)
     print(f"Found: {name}  (secretid={row['secretid']})")
     print(f"  Current username in Vault: {current_username!r}")
     print(f"  Current password in Vault: {current_password!r}")
@@ -118,8 +118,8 @@ def main():
 
     new_secret_data = {
         **secret_data,
-        "username": zvcrypto.aes_encrypt(new_username, key),
-        "password": zvcrypto.aes_encrypt(new_password_plain, key),
+        username_field: zvcrypto.aes_encrypt(new_username, key),
+        password_field: zvcrypto.aes_encrypt(new_password_plain, key),
     }
     field_summary = " and ".join(c.split(" -> ")[0] for c in changes)
     description = f"{field_summary.capitalize()} manually updated: {datetime.now(timezone.utc).strftime('%B %Y')}"

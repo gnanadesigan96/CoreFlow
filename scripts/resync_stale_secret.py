@@ -78,7 +78,7 @@ def main():
     row = find_row(rows, args)
     name = row.get("secretname") or row["secretid"]
 
-    username, current_vault_password, key, secret_data = m.decrypt_credentials(row, master_key, org_key)
+    username, current_vault_password, key, secret_data, username_field, password_field = m.decrypt_credentials(row, master_key, org_key)
     print(f"Found: {name}  (secretid={row['secretid']})")
     print(f"  Username in Vault: {username!r}")
     print(f"  Password Vault currently has (STALE, no longer valid on the app): {current_vault_password!r}")
@@ -96,7 +96,7 @@ def main():
     if confirm.strip().lower() != "yes":
         sys.exit("Aborted -- nothing written.")
 
-    new_secret_data = {**secret_data, "password": zvcrypto.aes_encrypt(new_password, key)}
+    new_secret_data = {**secret_data, password_field: zvcrypto.aes_encrypt(new_password, key)}
     description = f"Password manually resynced: {datetime.now(timezone.utc).strftime('%B %Y')}"
     m.update_secret(dc, token, row["secretid"], m.build_full_update_payload(row, secretdata=new_secret_data, description=description))
     print(f"Done -- Vault's password for {name!r} now matches what you entered.")

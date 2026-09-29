@@ -142,8 +142,8 @@ def main():
     succeeded, failed = [], []
     for name, row in matched:
         try:
-            _, _, key, secret_data = m.decrypt_credentials(row, master_key, org_key)
-            new_secret_data = {**secret_data, "password": zvcrypto.aes_encrypt(new_password, key)}
+            _, _, key, secret_data, username_field, password_field = m.decrypt_credentials(row, master_key, org_key)
+            new_secret_data = {**secret_data, password_field: zvcrypto.aes_encrypt(new_password, key)}
             m.update_secret(dc, token, row["secretid"], m.build_full_update_payload(row, secretdata=new_secret_data, description=description))
             print(f"  [ok] {name}")
             succeeded.append(name)

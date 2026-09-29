@@ -61,13 +61,14 @@ def main():
             print()
             continue
 
-        username, password, key, secret_data = m.decrypt_credentials(row, master_key, org_key)
+        username, password, key, secret_data, username_field, password_field = m.decrypt_credentials(row, master_key, org_key)
         endpoint, matched_url, reason = m.resolve_app_endpoint(row, key=key)
 
         weird_username_chars = [c for c in username if c.isspace() or not c.isprintable()]
         weird_password_chars = [c for c in password if c.isspace() or not c.isprintable()]
 
         print(f"  isshared: {row.get('isshared')!r}  (key used: {'org_key' if row.get('isshared') == 'YES' else 'master_key'})")
+        print(f"  secretData fields used: username={username_field!r}, password={password_field!r}")
         print(f"  username: {username!r}  (len={len(username)})")
         print(f"  username has whitespace/invisible chars: {[repr(c) for c in weird_username_chars] or 'none'}")
         print(f"  password: {mask(password)!r}  (len={len(password)})")
