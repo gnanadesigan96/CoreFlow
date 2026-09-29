@@ -468,7 +468,7 @@ def change_app_password(app_endpoint, username, current_password, new_password):
         return False, f"auth request error: {e}"
 
     if auth_resp.status_code // 100 != 2:
-        return False, f"auth failed: HTTP {auth_resp.status_code} {auth_resp.text[:200]}"
+        return False, f"auth failed: HTTP {auth_resp.status_code} {auth_resp.text[:2000]}"
 
     auth_body = auth_resp.json()
     token = (auth_body.get("token") or {}).get("access_token")
@@ -488,7 +488,7 @@ def change_app_password(app_endpoint, username, current_password, new_password):
 
     if change_resp.status_code == 200:
         return True, "ok"
-    return False, f"change_password failed: HTTP {change_resp.status_code} {change_resp.text[:200]}"
+    return False, f"change_password failed: HTTP {change_resp.status_code} {change_resp.text[:2000]}"
 
 
 def rotate_secret(dc, token, row, master_key, org_key, apply):
