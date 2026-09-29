@@ -150,6 +150,7 @@ SMTP_FROM = "productsupport@corestack.io"
 def parse_args():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--folder-id", action="append", required=True, help="Vault chamberId (folder ID) -- read it from the folder's URL in the Vault web UI. Repeat for multiple folders.")
+    p.add_argument("--secret-name", action="append", help="Only process secrets with this exact secretname (repeatable). Omit to process every secret in the given folder(s) -- useful for isolating a single account to test/retry.")
     p.add_argument("--dc", default=os.environ.get("ZOHO_VAULT_DC", "com"), help="Zoho data center (default: com, or $ZOHO_VAULT_DC)")
     p.add_argument("--apply", action="store_true", help="Actually change app + Vault passwords (default: dry run)")
     p.add_argument("--email-to", default="gnanadesigan@corestack.io", help="Summary email recipient")
@@ -543,8 +544,14 @@ def rotate_secret(dc, token, row, master_key, org_key, apply):
     return {"name": name, "endpoint": endpoint_display, "status": "success", "detail": ""}
 
 
-def rotate_folder(dc, token, folder_id, master_key, org_key, apply):
+def rotate_folder(dc, token, folder_id, master_key, org_key, apply, secret_names=None):
     rows = list_secrets(dc, token, folder_id=folder_id)
+    if secret_names:
+        wanted = set(secret_names)
+        rows = [r for r in rows if r.get("secretname") in wanted]
+        found_names = {r.get("secretname") for r in rows}
+        for missing in wanted - found_names:
+            print(f"  (not found in this folder, skipped: {missing!r})")
     results = []
     for row in rows:
         result = rotate_secret(dc, token, row, master_key, org_key, apply)
@@ -850,7 +857,7 @@ def main():
     all_results = {}
     for folder_id in args.folder_id:
         print(f"Folder {folder_names.get(str(folder_id), folder_id)}:")
-        all_results[folder_id] = rotate_folder(dc, token, folder_id, master_key, org_key, args.apply)
+        all_results[folder_id] = rotate_folder(dc, token, folder_id, master_key, org_key, args.apply, secret_names=args.secret_name)
         print()
 
     summary, total, succeeded, failed = build_summary(all_results, folder_names)
