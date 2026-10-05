@@ -126,6 +126,8 @@ REGION_ENDPOINTS = {
     # match above -- each needs its own explicit one-off entry, confirmed
     # per-domain by the user rather than guessed.
     "mirai.chavans.ai": "api-in.corestack.io",  # India SaaS -- confirmed by user
+    "portal.trackmycloud.com": "mea-api.corestack.io",  # MEA -- confirmed by user
+    "cloudportal.logicalis.com": "portal-api.corestack.io",  # confirmed by user
 }
 
 DC_HOSTS = {
