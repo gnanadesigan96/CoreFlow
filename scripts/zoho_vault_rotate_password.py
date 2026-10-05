@@ -624,7 +624,15 @@ def rotate_secret(dc, token, row, master_key, org_key, apply, forced_new_passwor
 
     if forced_new_password is not None:
         new_password = forced_new_password
-        description = f"Password rotated: {datetime.now(timezone.utc).strftime('%B %Y')} (shared account, synced from {shared_with})"
+        # Deliberately the SAME plain format as the normal case below, not
+        # "... (synced from X)" -- a secret name can contain almost any
+        # character (dashes, underscores, parens...), and embedding one
+        # here previously broke on every sibling with PATTERN_NOT_MATCHED,
+        # the exact failure mode this format was already built to avoid.
+        # The "synced from" detail still shows in our own report/console
+        # via the returned "detail" field below -- that's never sent to
+        # Zoho, so it has no character restrictions.
+        description = f"Password rotated: {datetime.now(timezone.utc).strftime('%B %Y')}"
         try:
             new_secret_data = {**secret_data, password_field: zvcrypto.aes_encrypt(new_password, key)}
             update_secret(dc, token, row["secretid"], build_full_update_payload(row, secretdata=new_secret_data, description=description))
