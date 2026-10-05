@@ -452,11 +452,79 @@ def resolve_app_endpoint(row, key=None):
     return None, None, f"stored URL(s) {candidates!r} don't match any known region in REGION_ENDPOINTS"
 
 
+def _resolve_source_user(app_endpoint, user_id, headers, master_account_ids):
+    """Some accounts are "linked" identities shared across multiple master
+    accounts (tenants) -- confirmed against live accounts with
+    is_account_admin=true and several master_account_ids (e.g.
+    cs.support.blackstone.read, cs.support.ingram.read). For these, the
+    password can only actually be changed in whichever master-account
+    context holds the account's real "source" identity, which may differ
+    from wherever the initial login happens to land -- auth succeeds, but
+    change_password then fails ("Current password is incorrect") because
+    it's being called against the wrong context's user_id.
+
+    Walks master_account_ids, switching context via
+    /v1/user/switch_account/{master_id}, until GET /users/view/{user_id}
+    reports we've reached the source user (no source_user_id, or it
+    matches user_id) or a 403 on users/read -- confirmed (via the
+    application's own reference script for this) to mean the current
+    context is already the one the change is allowed in directly.
+
+    Returns (user_id, headers) to use for the change_password call. Every
+    exit path falls through to the CURRENT user_id/headers unchanged on
+    anything ambiguous (a request error, an unexpected status, a failed
+    switch) -- this can only unlock handling the multi-master-account case
+    above; it can never block the plain single-account case that already
+    works for most secrets, since those get a 403 on the very first call
+    and return immediately with nothing changed.
+    """
+    remaining_masters = iter(master_account_ids)
+    while True:
+        try:
+            resp = requests.get(f"https://{app_endpoint}/users/view/{user_id}", headers=headers, timeout=30)
+            body = resp.json() if resp.content else {}
+        except (requests.RequestException, ValueError):
+            return user_id, headers
+
+        message = str(body.get("message", "")) if isinstance(body, dict) else ""
+        if resp.status_code == 403 or "users/read" in message:
+            return user_id, headers
+        if resp.status_code // 100 != 2:
+            return user_id, headers
+
+        source_user_id = body.get("source_user_id") or None
+        if not source_user_id or source_user_id == user_id:
+            return user_id, headers
+
+        master_id = next(remaining_masters, None)
+        if master_id is None:
+            return user_id, headers
+
+        try:
+            switch_resp = requests.get(f"https://{app_endpoint}/v1/user/switch_account/{master_id}", headers=headers, timeout=30)
+        except requests.RequestException:
+            continue
+        if switch_resp.status_code // 100 != 2:
+            continue
+
+        switch_body = switch_resp.json()
+        new_token = (switch_body.get("token") or {}).get("access_token")
+        new_user_id = (switch_body.get("user") or {}).get("id")
+        if not new_token:
+            continue
+
+        headers = {**headers, "X-Auth-Token": new_token}
+        if new_user_id:
+            user_id = new_user_id
+
+
 def change_app_password(app_endpoint, username, current_password, new_password):
     """Calls the application's auth + change-password endpoints. Returns
     (ok: bool, detail: str). Ported from the API code shared for this --
     note the original used the user_id extracted from the auth response
-    for the change-password URL, not a hardcoded one.
+    for the change-password URL, not a hardcoded one. Also resolves
+    multi-master-account "linked" identities via _resolve_source_user()
+    before attempting the change -- see its docstring.
     """
     try:
         auth_resp = requests.post(
@@ -474,13 +542,17 @@ def change_app_password(app_endpoint, username, current_password, new_password):
     auth_body = auth_resp.json()
     token = (auth_body.get("token") or {}).get("access_token")
     user_id = (auth_body.get("user") or {}).get("id")
+    master_account_ids = (auth_body.get("user") or {}).get("master_account_ids") or []
     if not token or not user_id:
         return False, f"auth response missing token/user id: {auth_body}"
+
+    headers = {"accept": "application/json", "X-Auth-Token": token, "Content-Type": "application/json"}
+    user_id, headers = _resolve_source_user(app_endpoint, user_id, headers, master_account_ids)
 
     try:
         change_resp = requests.put(
             f"https://{app_endpoint}/users/change_password/{user_id}",
-            headers={"accept": "application/json", "X-Auth-Token": token, "Content-Type": "application/json"},
+            headers=headers,
             json={"current_password": current_password, "new_password": new_password},
             timeout=30,
         )
