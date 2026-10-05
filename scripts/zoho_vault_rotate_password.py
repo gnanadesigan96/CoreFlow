@@ -120,6 +120,7 @@ REGION_ENDPOINTS = {
     "in.corestack.io": "api-in.corestack.io",
     "useast.corestack.io": "api-useast.corestack.io",
     "us3.corestack.io": "api-us3.corestack.io",
+    "preview.corestack.io": "preview-api.corestack.io",
     # White-labeled customer domains that don't share a corestack.io/
     # hootstack.com suffix, so they can't resolve via the subdomain-suffix
     # match above -- each needs its own explicit one-off entry, confirmed
