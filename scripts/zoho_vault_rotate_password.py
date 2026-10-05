@@ -588,34 +588,64 @@ def change_app_password(app_endpoint, username, current_password, new_password):
             user_id = new_user_id
 
 
-def rotate_secret(dc, token, row, master_key, org_key, apply):
+def rotate_secret(dc, token, row, master_key, org_key, apply, forced_new_password=None, shared_with=None):
+    """Rotates one secret. If forced_new_password is given, this secret
+    shares a live application account with another secret already rotated
+    in this run (same username + endpoint, confirmed by rotate_folder's
+    grouping) -- the app password was already changed by that secret, so
+    no app call is made here at all; this only re-encrypts the SAME new
+    password into this secret's own Vault entry (with its own key, which
+    may differ from the sibling's if isshared differs). `shared_with`
+    names that other secret, for the description/detail text. Every
+    returned dict includes "new_password" (None unless this call actually
+    performed a real app-side change) so rotate_folder can propagate it to
+    the rest of that account's group -- never surfaced in any report.
+    """
     name = row.get("secretname") or row["secretid"]
 
     try:
         username, current_password, key, secret_data, username_field, password_field = decrypt_credentials(row, master_key, org_key)
     except Exception as e:
-        return {"name": name, "endpoint": None, "status": "failed", "detail": f"decrypt error: {e}"}
+        return {"name": name, "endpoint": None, "status": "failed", "detail": f"decrypt error: {e}", "new_password": None}
 
     endpoint, matched_url, reason = resolve_app_endpoint(row, key=key)
     if not endpoint:
-        return {"name": name, "endpoint": None, "status": "failed", "detail": reason}
+        return {"name": name, "endpoint": None, "status": "failed", "detail": reason, "new_password": None}
     # Shown in every report line as proof the endpoint came from this
     # secret's own Vault data, not a guess.
     endpoint_display = f"{endpoint} (via {matched_url})"
 
     if not apply:
-        return {
-            "name": name,
-            "endpoint": endpoint_display,
-            "status": "dry-run",
-            "detail": f"would authenticate as {username!r} against {endpoint}, change the app password, then update Vault",
-        }
+        if forced_new_password is not None:
+            detail = f"shares a live account with {shared_with!r} -- would sync that account's new password into Vault here too, without a separate app call"
+        else:
+            detail = f"would authenticate as {username!r} against {endpoint}, change the app password, then update Vault"
+        return {"name": name, "endpoint": endpoint_display, "status": "dry-run", "detail": detail, "new_password": None}
+
+    if forced_new_password is not None:
+        new_password = forced_new_password
+        description = f"Password rotated: {datetime.now(timezone.utc).strftime('%B %Y')} (shared account, synced from {shared_with})"
+        try:
+            new_secret_data = {**secret_data, password_field: zvcrypto.aes_encrypt(new_password, key)}
+            update_secret(dc, token, row["secretid"], build_full_update_payload(row, secretdata=new_secret_data, description=description))
+        except Exception as e:
+            return {
+                "name": name,
+                "endpoint": endpoint_display,
+                "status": "failed",
+                "detail": (
+                    f"shares a live account with {shared_with!r} (already changed there) but the Vault sync failed "
+                    f"here -- Vault now shows a STALE password for this account and needs a manual fix: {e}"
+                ),
+                "new_password": new_password,
+            }
+        return {"name": name, "endpoint": endpoint_display, "status": "success", "detail": f"synced from shared account {shared_with!r}", "new_password": new_password}
 
     new_password = generate_password()
 
     ok, detail = change_app_password(endpoint, username, current_password, new_password)
     if not ok:
-        return {"name": name, "endpoint": endpoint_display, "status": "failed", "detail": f"app password change failed: {detail}"}
+        return {"name": name, "endpoint": endpoint_display, "status": "failed", "detail": f"app password change failed: {detail}", "new_password": None}
 
     try:
         new_secret_data = {**secret_data, password_field: zvcrypto.aes_encrypt(new_password, key)}
@@ -635,9 +665,50 @@ def rotate_secret(dc, token, row, master_key, org_key, apply):
                 "APP PASSWORD WAS ALREADY CHANGED but the Vault update failed afterward -- "
                 f"Vault now shows a STALE password for this account and needs a manual fix: {e}"
             ),
+            "new_password": new_password,
         }
 
-    return {"name": name, "endpoint": endpoint_display, "status": "success", "detail": ""}
+    return {"name": name, "endpoint": endpoint_display, "status": "success", "detail": "", "new_password": new_password}
+
+
+def _group_shared_accounts(rows, master_key, org_key):
+    """Some secrets share the exact same live application account -- the
+    same username against the same endpoint -- under separate Vault
+    entries (confirmed in PSAdminCreds, e.g. cs.pssupport.ingram @
+    api-msprod.corestack.io on over a dozen differently-named secrets).
+    Returns {secretid: (primary_secretid, primary_name)} for every
+    secret that is NOT the first (alphabetically, by list_secrets' own
+    ordering) member of such a group -- those are "siblings" that should
+    sync the primary's new password into their own Vault entry rather
+    than independently changing the live app password again. A row whose
+    own decrypt/endpoint-resolution fails is left out of grouping
+    entirely and just proceeds through the normal per-secret path, same
+    as before this existed.
+    """
+    group_key_by_secretid = {}
+    for row in rows:
+        try:
+            username, _, key, _, _, _ = decrypt_credentials(row, master_key, org_key)
+            endpoint, _, _ = resolve_app_endpoint(row, key=key)
+        except Exception:
+            continue
+        if endpoint:
+            group_key_by_secretid[row["secretid"]] = (username, endpoint)
+
+    groups = {}
+    for row in rows:
+        gk = group_key_by_secretid.get(row["secretid"])
+        if gk:
+            groups.setdefault(gk, []).append(row)
+
+    primary_of = {}
+    for group_rows in groups.values():
+        if len(group_rows) > 1:
+            primary = group_rows[0]
+            primary_name = primary.get("secretname") or primary["secretid"]
+            for sibling in group_rows[1:]:
+                primary_of[sibling["secretid"]] = (primary["secretid"], primary_name)
+    return primary_of
 
 
 def rotate_folder(dc, token, folder_id, master_key, org_key, apply, secret_names=None):
@@ -648,9 +719,34 @@ def rotate_folder(dc, token, folder_id, master_key, org_key, apply, secret_names
         found_names = {r.get("secretname") for r in rows}
         for missing in wanted - found_names:
             print(f"  (not found in this folder, skipped: {missing!r})")
+
+    primary_of = _group_shared_accounts(rows, master_key, org_key)
+    results_by_secretid = {}
     results = []
     for row in rows:
-        result = rotate_secret(dc, token, row, master_key, org_key, apply)
+        secretid = row["secretid"]
+        if secretid in primary_of:
+            primary_id, primary_name = primary_of[secretid]
+            primary_result = results_by_secretid.get(primary_id)
+            forced_new_password = primary_result.get("new_password") if primary_result else None
+            if forced_new_password is not None:
+                result = rotate_secret(dc, token, row, master_key, org_key, apply, forced_new_password=forced_new_password, shared_with=primary_name)
+            else:
+                primary_detail = primary_result["detail"] if primary_result else "primary secret for this shared account has not run yet in this batch"
+                result = {
+                    "name": row.get("secretname") or secretid,
+                    "endpoint": None,
+                    "status": "dry-run" if not apply else "failed",
+                    "detail": (
+                        f"shares a live account with {primary_name!r} -- would sync its new password here once rotated, without a separate app call"
+                        if not apply else
+                        f"shares a live account with {primary_name!r}, whose app password change failed -- not attempting an independent change here: {primary_detail}"
+                    ),
+                }
+        else:
+            result = rotate_secret(dc, token, row, master_key, org_key, apply)
+
+        results_by_secretid[secretid] = result
         results.append(result)
         suffix = f" -- {result['detail']}" if result["detail"] else ""
         # endpoint carries "(via <matched vault URL>)" -- printed here too so
