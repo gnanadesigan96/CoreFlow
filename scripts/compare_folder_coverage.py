@@ -77,6 +77,37 @@ def normalize(name):
     return words
 
 
+def joined(name):
+    # Concatenates normalize()'s significant words with no separator --
+    # catches the case where one side's secret name is written as a single
+    # compound word and the other's camelCase/punctuation splits it into
+    # pieces, so the word-set check above finds no shared token at all.
+    # Confirmed real misses of exactly this shape: "New-ConRes" (splits to
+    # "con"+"res") vs "cs.support.conres.read" (one token "conres");
+    # "New-Taylor_Farms" ("taylor"+"farms") vs "...taylorfarms.read" (one
+    # token). A short min-length guard (below) keeps this from matching on
+    # trivial short fragments.
+    return "".join(normalize(name))
+
+
+# Minimum length for the joined/substring comparison -- below this, short
+# fragments ("ps", "cmp") would substring-match all over the place. 5 was
+# picked so a single filtered word just above the per-word 3-char floor
+# doesn't alone qualify, but two combined ("con"+"res" = "conres", 6
+# chars) does.
+_MIN_JOINED_LEN = 5
+
+
+def names_match(name_a, name_b):
+    words_a, joined_a = set(normalize(name_a)), joined(name_a)
+    words_b, joined_b = set(normalize(name_b)), joined(name_b)
+    if words_a and (words_a & words_b):
+        return True
+    if len(joined_a) >= _MIN_JOINED_LEN and len(joined_b) >= _MIN_JOINED_LEN:
+        return joined_a in joined_b or joined_b in joined_a
+    return False
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--read-folder-id", required=True, help="The read-only credentials folder (e.g. CustomerReadCreds)")
@@ -128,7 +159,6 @@ def main():
 
     read_entries = [(name_of(r), url_of(r), identity_of(r)) for r in read_rows]
     admin_entries = [(name_of(r), url_of(r), identity_of(r)) for r in admin_rows]
-    read_word_sets = [(name, url, set(normalize(name))) for name, url, _ident in read_entries]
 
     # Username match requires the same username; when BOTH sides also have
     # a resolved host, the hosts must agree too (a shared username on two
@@ -153,8 +183,7 @@ def main():
             matched_by_username.append((admin_name, admin_url, admin_ident[0], username_candidates))
             continue
 
-        admin_words = set(normalize(admin_name))
-        name_candidates = [(read_name, read_url) for read_name, read_url, read_words in read_word_sets if admin_words and (admin_words & read_words)]
+        name_candidates = [(read_name, read_url) for read_name, read_url, _ident in read_entries if names_match(admin_name, read_name)]
         if name_candidates:
             matched_by_name.append((admin_name, admin_url, name_candidates))
         else:
