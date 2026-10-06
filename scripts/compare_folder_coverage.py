@@ -1,21 +1,35 @@
 #!/usr/bin/env python3
-"""Compares secret NAMES between two Vault folders (no decryption needed --
-only secretname is used) to find customers that appear to have one but not
-the other -- e.g. an admin credential in PSAdminCreds with no corresponding
-read-only credential in CustomerReadCreds.
+"""Compares secrets between two Vault folders to find customers that appear
+to have one but not the other -- e.g. an admin credential in PSAdminCreds
+with no corresponding read-only credential in CustomerReadCreds.
 
-Matching is NAME-based and heuristic, not exact: the two folders use very
-different naming conventions (e.g. "cs.support.hitachi.read" vs
-"New-Hitachi"), so secret names are normalized -- common prefixes/suffixes
-and generic words stripped, punctuation collapsed to spaces, lowercased --
-into a set of significant words; two secrets are considered a likely match
-if they share at least one such word (3+ characters, not purely numeric).
-This WILL have false positives/negatives on ambiguous or very short names
--- treat the output as a starting point for manual review, not a
-guaranteed-accurate audit.
+Matching is USERNAME-based first: each secret's real (username, endpoint)
+pair is decrypted the same way the rotation script resolves it, and two
+secrets are a CONFIRMED match if they share the same username on the same
+host. This is exact, not heuristic, and fixes the real misses the old
+name-only matching had (e.g. "New-ClickIT"/"New-Interwor"/"New-Tigloo" vs
+"cs.support.ingrammicroeu.read" -- names share no text at all, but they are
+the same live account).
 
-Setup: ZOHO_VAULT_CLIENT_ID/SECRET/REFRESH_TOKEN, ZOHO_VAULT_DC env vars
-only -- no master password needed, since this never decrypts anything.
+When a secret's username can't be decrypted/resolved (unrecognized schema,
+no stored URL to resolve an endpoint for, etc.) or has no username-based
+match, we fall back to the old NAME heuristic as a lower-confidence
+secondary signal: names are normalized -- camelCase boundaries and
+punctuation split apart, common prefixes/suffixes and generic/region words
+stripped, lowercased -- into a set of significant words, and two secrets
+are a "likely match (name only)" if they share at least one such word (3+
+characters, not purely numeric). This still has false positives/negatives
+on ambiguous or very short names -- treat name-only matches as a starting
+point for manual review, not a guaranteed-accurate audit. (Confirmed bugs
+fixed here: "USEast" wasn't being split into "US"+"East" before, so two
+unrelated same-region secrets matched on the leftover "useast" token alone;
+and "tech" alone matched unrelated customers -- both fixed below. Username
+matching makes these moot for any secret where both sides resolve.)
+
+Needs ZOHO_VAULT_MASTER_PASSWORD too, not just the OAuth env vars: both the
+username and some secrets' URLs (stored as an encrypted "Additional Field"
+rather than the plaintext secreturl field, confirmed earlier this session)
+require decryption.
 
 Usage:
   python3 scripts/compare_folder_coverage.py \
@@ -35,11 +49,25 @@ _NOISE_WORDS = {
     "poc", "assesments", "assessments", "services", "service", "group", "csp", "saas",
     "customers", "customer", "systems", "system", "team", "env", "ps", "automate",
     "the", "and", "pov", "cmp",
+    # Generic corporate-name/legal-entity fragments -- too common across
+    # UNRELATED customers to be a reliable match signal on their own
+    # (confirmed bug: "New-Converge_Tech" matched "Trusted Tech Read" on
+    # "tech" alone). Deliberately conservative -- only words with a
+    # confirmed false-match, plus the unambiguous legal-entity suffixes,
+    # not broader guesses that could hide a real match instead.
+    "tech", "technology", "technologies", "solutions", "consulting",
+    "inc", "corp", "corporation", "ltd", "llc",
 }
 
 
 def normalize(name):
-    s = name.lower()
+    # Split camelCase boundaries BEFORE lowercasing/punctuation-collapsing,
+    # so e.g. "USEast" becomes "US East" (then "us"/"east", both already
+    # noise words) instead of surviving as one unmatched-by-noise-list
+    # token "useast" that two unrelated same-region secrets would share.
+    s = re.sub(r"(?<=[a-z])(?=[A-Z])", " ", name)
+    s = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", s)
+    s = s.lower()
     s = re.sub(r"[^a-z0-9]+", " ", s)
     words = []
     for w in s.split():
@@ -61,40 +89,91 @@ def main():
         sys.exit(f"Unknown data center \"{args.dc}\". Known values: {', '.join(m.DC_HOSTS)}")
 
     token = m.get_access_token(dc)
+    master_password = os.environ.get("ZOHO_VAULT_MASTER_PASSWORD")
+    if not master_password:
+        sys.exit("Set ZOHO_VAULT_MASTER_PASSWORD -- needed to decrypt URLs stored in an encrypted Additional Field")
+    master_key, org_key = m.derive_keys(dc, token, master_password)
+
     read_rows = m.list_secrets(dc, token, folder_id=args.read_folder_id)
     admin_rows = m.list_secrets(dc, token, folder_id=args.admin_folder_id)
 
     def url_of(row):
-        if row.get("secreturl"):
-            return row["secreturl"]
-        for u in row.get("secretmultipleurl") or []:
-            if u:
-                return u
-        return ""
+        # candidate_urls(), not resolve_app_endpoint() -- the latter only
+        # returns a URL when it ALSO matches a known region in
+        # REGION_ENDPOINTS, which would hide the real URL for secrets on
+        # an unmapped domain (e.g. kyndryl.corestack.io, next.yotascale.io)
+        # even though it was found and decrypted just fine.
+        key = org_key if row.get("isshared") == "YES" else master_key
+        candidates = m.candidate_urls(row, key=key)
+        return candidates[0] if candidates else ""
 
-    read_entries = [(r.get("secretname") or r["secretid"], url_of(r)) for r in read_rows]
-    admin_entries = [(r.get("secretname") or r["secretid"], url_of(r)) for r in admin_rows]
-    read_word_sets = [(name, url, set(normalize(name))) for name, url in read_entries]
+    def identity_of(row):
+        # Returns (username_lower, host) if both decrypt/resolve cleanly,
+        # else None. host is the normalized hostname of the secret's own
+        # URL (not the REGION_ENDPOINTS-mapped endpoint) so two secrets on
+        # the same real host match even if that host isn't in
+        # REGION_ENDPOINTS yet.
+        try:
+            username, _password, _key, _data, _uf, _pf = m.decrypt_credentials(row, master_key, org_key)
+        except Exception:
+            return None
+        if not username:
+            return None
+        urls = url_of(row)
+        host = m._normalize_host(urls) if urls else ""
+        return (username.strip().lower(), host)
+
+    def name_of(row):
+        return row.get("secretname") or row["secretid"]
+
+    read_entries = [(name_of(r), url_of(r), identity_of(r)) for r in read_rows]
+    admin_entries = [(name_of(r), url_of(r), identity_of(r)) for r in admin_rows]
+    read_word_sets = [(name, url, set(normalize(name))) for name, url, _ident in read_entries]
+
+    # Username match requires the same username; when BOTH sides also have
+    # a resolved host, the hosts must agree too (a shared username on two
+    # different hosts is a coincidence, not the same account). When either
+    # side has no resolvable host, there's nothing to conflict with, so a
+    # plain username match is still accepted -- that's exact, not
+    # heuristic, just missing the extra host confirmation.
+    read_identity_rows = [(ident[0], ident[1], name, url) for name, url, ident in read_entries if ident]
+
+    def username_match(admin_username, admin_host):
+        exact = [(name, url) for u, h, name, url in read_identity_rows if u == admin_username and h and admin_host and h == admin_host]
+        if exact:
+            return exact
+        return [(name, url) for u, h, name, url in read_identity_rows if u == admin_username and (not h or not admin_host)]
 
     unmatched = []
-    matched = []
-    for admin_name, admin_url in admin_entries:
+    matched_by_username = []
+    matched_by_name = []
+    for admin_name, admin_url, admin_ident in admin_entries:
+        username_candidates = username_match(*admin_ident) if admin_ident else []
+        if username_candidates:
+            matched_by_username.append((admin_name, admin_url, admin_ident[0], username_candidates))
+            continue
+
         admin_words = set(normalize(admin_name))
-        candidates = [(read_name, read_url) for read_name, read_url, read_words in read_word_sets if admin_words and (admin_words & read_words)]
-        if candidates:
-            matched.append((admin_name, admin_url, candidates))
+        name_candidates = [(read_name, read_url) for read_name, read_url, read_words in read_word_sets if admin_words and (admin_words & read_words)]
+        if name_candidates:
+            matched_by_name.append((admin_name, admin_url, name_candidates))
         else:
             unmatched.append((admin_name, admin_url))
 
     print(f"PSAdminCreds (write): {len(admin_entries)} secrets. CustomerReadCreds (read): {len(read_entries)} secrets.\n")
 
     print(f"=== {len(unmatched)} secret(s) in WRITE with no read counterpart found -- MISSING IN READ ===")
-    print("(heuristic name match -- verify manually; a few known misses exist where the names share no text at all)\n")
+    print("(no shared username/host, and no shared-word name match either -- verify manually)\n")
     for name, url in sorted(unmatched):
         print(f"  {name}  |  {url or '(no URL stored)'}")
 
-    print(f"\n=== {len(matched)} secret(s) in WRITE with a likely match already in READ ===")
-    for name, url, candidates in sorted(matched):
+    print(f"\n=== {len(matched_by_username)} secret(s) in WRITE matched to READ by USERNAME (confirmed, same account) ===")
+    for name, url, username, candidates in sorted(matched_by_username):
+        candidate_str = ", ".join(f"{cname} | {curl or '(no URL stored)'}" for cname, curl in candidates)
+        print(f"  {name}  |  {url or '(no URL stored)'}  |  username: {username}  ->  {candidate_str}")
+
+    print(f"\n=== {len(matched_by_name)} secret(s) in WRITE matched to READ by NAME only (heuristic -- verify manually) ===")
+    for name, url, candidates in sorted(matched_by_name):
         candidate_str = ", ".join(f"{cname} | {curl or '(no URL stored)'}" for cname, curl in candidates)
         print(f"  {name}  |  {url or '(no URL stored)'}  ->  {candidate_str}")
 

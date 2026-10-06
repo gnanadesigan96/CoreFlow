@@ -402,28 +402,15 @@ def _normalize_host(value):
     return value.split("/")[0]
 
 
-def resolve_app_endpoint(row, key=None):
-    """Match the secret's own stored URL against REGION_ENDPOINTS to find
-    which API host to call for this account. There is no override or
-    default endpoint -- a secret is only ever routed to the endpoint its
-    own Vault data resolves to.
-
-    Confirmed against a live account: some secrets store the URL as the
+def candidate_urls(row, key=None):
+    """Every URL actually stored on this secret, in Vault's own data --
     plaintext `secreturl`/`secretmultipleurl` fields (Vault's built-in
-    Website field), but others -- this account included -- leave those
-    empty and instead store it as an ENCRYPTED "Additional Field" under
-    `encryptedurls`, using the exact same AES scheme as the username/
-    password (needs `key`, the master/org key this secret's isshared value
-    selects, to decrypt). Plaintext fields are tried first since they need
-    no decryption; encryptedurls is only consulted if those are empty and a
-    key was given.
-
-    Returns (endpoint, matched_url, reason). On success, `endpoint` is the
-    resolved API host and `matched_url` is the secret's own URL that
-    matched (proof this came from Vault, not a guess). On failure,
-    `endpoint`/`matched_url` are None and `reason` explains why: either the
-    secret has no stored URL at all, or its stored URL(s) don't match any
-    entry in REGION_ENDPOINTS.
+    Website field) first, since those need no decryption; if both are
+    empty and a key is given, falls back to decrypting `encryptedurls`,
+    the "Additional Field" convention confirmed on some secrets in this
+    account. Returns a list (possibly empty) -- this is just "what URLs
+    does this secret have", independent of whether any of them match a
+    known region in REGION_ENDPOINTS.
     """
     candidates = []
     if row.get("secreturl"):
@@ -443,6 +430,25 @@ def resolve_app_endpoint(row, key=None):
             if decrypted:
                 candidates.append(decrypted)
 
+    return candidates
+
+
+def resolve_app_endpoint(row, key=None):
+    """Match the secret's own stored URL (via candidate_urls()) against
+    REGION_ENDPOINTS to find which API host to call for this account.
+    There is no override or default endpoint -- a secret is only ever
+    routed to the endpoint its own Vault data resolves to.
+
+    Returns (endpoint, matched_url, reason). On success, `endpoint` is the
+    resolved API host and `matched_url` is the secret's own URL that
+    matched (proof this came from Vault, not a guess). On failure,
+    `endpoint`/`matched_url` are None and `reason` explains why: either the
+    secret has no stored URL at all, or its stored URL(s) don't match any
+    entry in REGION_ENDPOINTS -- note a non-matching URL is still a real,
+    found URL, just not one in the known-region table; use
+    candidate_urls() directly if you need to see it regardless.
+    """
+    candidates = candidate_urls(row, key=key)
     if not candidates:
         return None, None, "no URL is stored on this secret in Vault -- cannot determine which API endpoint to use"
 
