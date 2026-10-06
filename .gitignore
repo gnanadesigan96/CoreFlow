@@ -32,6 +32,10 @@ supabase/.branches/
 # files, ticket #167197808) -- local-only, not committed to git.
 scripts/zvcrypto.py
 
+# Python bytecode cache
+__pycache__/
+*.pyc
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
