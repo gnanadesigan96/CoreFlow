@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Compares secrets between two Vault folders to find customers that appear
-to have one but not the other -- e.g. an admin credential in PSAdminCreds
-with no corresponding read-only credential in CustomerReadCreds.
+to have one but not the other -- in BOTH directions: an admin credential in
+PSAdminCreds with no corresponding read-only credential in
+CustomerReadCreds ("missing in read"), and vice versa ("missing in
+write").
 
 Matching is USERNAME-based first: each secret's real (username, endpoint)
 pair is decrypted the same way the rotation script resolves it, and two
@@ -177,23 +179,37 @@ def main():
     unmatched = []
     matched_by_username = []
     matched_by_name = []
+    matched_read_names = set()
     for admin_name, admin_url, admin_ident in admin_entries:
         username_candidates = username_match(*admin_ident) if admin_ident else []
         if username_candidates:
             matched_by_username.append((admin_name, admin_url, admin_ident[0], username_candidates))
+            matched_read_names.update(cname for cname, _curl in username_candidates)
             continue
 
         name_candidates = [(read_name, read_url) for read_name, read_url, _ident in read_entries if names_match(admin_name, read_name)]
         if name_candidates:
             matched_by_name.append((admin_name, admin_url, name_candidates))
+            matched_read_names.update(cname for cname, _curl in name_candidates)
         else:
             unmatched.append((admin_name, admin_url))
+
+    # A read entry counts as "found in write" if it showed up as a
+    # candidate for ANY admin match above (username or name) -- both match
+    # relations are symmetric, so this is equivalent to re-running the
+    # whole match search from the read side, without doing it twice.
+    missing_in_write = [(name, url) for name, url, _ident in read_entries if name not in matched_read_names]
 
     print(f"PSAdminCreds (write): {len(admin_entries)} secrets. CustomerReadCreds (read): {len(read_entries)} secrets.\n")
 
     print(f"=== {len(unmatched)} secret(s) in WRITE with no read counterpart found -- MISSING IN READ ===")
     print("(no shared username/host, and no shared-word name match either -- verify manually)\n")
     for name, url in sorted(unmatched):
+        print(f"  {name}  |  {url or '(no URL stored)'}")
+
+    print(f"\n=== {len(missing_in_write)} secret(s) in READ with no write counterpart found -- MISSING IN WRITE ===")
+    print("(no shared username/host, and no shared-word name match either -- verify manually)\n")
+    for name, url in sorted(missing_in_write):
         print(f"  {name}  |  {url or '(no URL stored)'}")
 
     print(f"\n=== {len(matched_by_username)} secret(s) in WRITE matched to READ by USERNAME (confirmed, same account) ===")
