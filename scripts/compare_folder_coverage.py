@@ -105,9 +105,38 @@ def names_match(name_a, name_b):
     words_b, joined_b = set(normalize(name_b)), joined(name_b)
     if words_a and (words_a & words_b):
         return True
-    if len(joined_a) >= _MIN_JOINED_LEN and len(joined_b) >= _MIN_JOINED_LEN:
+    if len(joined_a) < _MIN_JOINED_LEN or len(joined_b) < _MIN_JOINED_LEN:
+        return False
+    if joined_a == joined_b:
+        return True
+
+    if len(words_a) >= 2 or len(words_b) >= 2:
+        # At least one side is a genuine multi-word compound -- this is
+        # the actual signature of the bug this check targets (one side's
+        # name got camelCase/punctuation-split, the other didn't: "con" +
+        # "res" vs one token "conres"). Confirmed real matches of exactly
+        # this shape: ConRes, Taylor_Farms, IngramMicro-EU.
         return joined_a in joined_b or joined_b in joined_a
-    return False
+
+    # Both sides reduced to a single word: only accept a prefix/suffix
+    # relation when the leftover remainder is itself long enough (3+
+    # chars) to plausibly be a separate word someone appended, not a
+    # trivial 1-2 letter brand-name variant. Confirmed real collision
+    # this guards against: "New-ClickIT" (-> "click") is a prefix of
+    # "Clicko Read" (-> "clicko") by one throwaway letter "o" --
+    # different customers, not the same name split differently. Confirmed
+    # real match this still allows: "New-Converge_Tech" (-> "converge")
+    # vs "cs.support.convergetech.read" (-> "convergetech") -- the
+    # remainder "tech" is itself one of our noise words, just embedded in
+    # a single unsplit token instead of being stripped as its own word.
+    shorter, longer = sorted([joined_a, joined_b], key=len)
+    if longer.startswith(shorter):
+        remainder = longer[len(shorter):]
+    elif longer.endswith(shorter):
+        remainder = longer[: len(longer) - len(shorter)]
+    else:
+        return False
+    return len(remainder) >= 3
 
 
 def main():
@@ -140,6 +169,12 @@ def main():
         candidates = m.candidate_urls(row, key=key)
         return candidates[0] if candidates else ""
 
+    # Diagnostic counters so a 0-confirmed-matches run is distinguishable
+    # from "usernames genuinely differ between read/write by design" vs. a
+    # silent decrypt failure -- the two look identical in the final output
+    # otherwise.
+    identity_stats = {"decrypt_error": 0, "empty_username": 0, "resolved": 0}
+
     def identity_of(row):
         # Returns (username_lower, host) if both decrypt/resolve cleanly,
         # else None. host is the normalized hostname of the secret's own
@@ -149,9 +184,12 @@ def main():
         try:
             username, _password, _key, _data, _uf, _pf = m.decrypt_credentials(row, master_key, org_key)
         except Exception:
+            identity_stats["decrypt_error"] += 1
             return None
         if not username:
+            identity_stats["empty_username"] += 1
             return None
+        identity_stats["resolved"] += 1
         urls = url_of(row)
         host = m._normalize_host(urls) if urls else ""
         return (username.strip().lower(), host)
@@ -200,7 +238,14 @@ def main():
     # whole match search from the read side, without doing it twice.
     missing_in_write = [(name, url) for name, url, _ident in read_entries if name not in matched_read_names]
 
-    print(f"PSAdminCreds (write): {len(admin_entries)} secrets. CustomerReadCreds (read): {len(read_entries)} secrets.\n")
+    print(f"PSAdminCreds (write): {len(admin_entries)} secrets. CustomerReadCreds (read): {len(read_entries)} secrets.")
+    print(
+        f"Username decryption across both folders: {identity_stats['resolved']} resolved, "
+        f"{identity_stats['decrypt_error']} failed to decrypt, {identity_stats['empty_username']} decrypted to an empty username.\n"
+        "(Low USERNAME-matched counts below are expected if READ and WRITE genuinely use different "
+        "service-account usernames per customer -- that's normal for most accounts. This line is here "
+        "so a low count caused by decrypt failures instead doesn't look the same as that.)\n"
+    )
 
     print(f"=== {len(unmatched)} secret(s) in WRITE with no read counterpart found -- MISSING IN READ ===")
     print("(no shared username/host, and no shared-word name match either -- verify manually)\n")
